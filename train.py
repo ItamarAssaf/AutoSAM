@@ -4,7 +4,15 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 import os
+from torch.utils.data import Dataset, DataLoader
+import nibabel as nib
 import numpy as np
+from sklearn.model_selection import train_test_split
+from scipy.ndimage import zoom
+from scipy.ndimage import label
+from google.colab import drive
+import matplotlib.pyplot as plt
+import re
 from models.model_single import ModelEmb
 from dataset.glas import get_glas_dataset
 from dataset.MoNuBrain import get_monu_dataset
@@ -66,6 +74,10 @@ def gen_step(optimizer, gts, masks, criterion, accumulation_steps, step):
 def get_input_dict(imgs, original_sz, img_sz):
     batched_input = []
     for i, img in enumerate(imgs):
+        print(f"len of images: {len(imgs)}")
+        print(f"img_sz: {len(img_sz)}")
+        print(f"img_sz[i] shape: {img_sz[i].shape}")
+        print(i)
         input_size = tuple([int(x) for x in img_sz[i].squeeze().tolist()])
         original_size = tuple([int(x) for x in original_sz[i].squeeze().tolist()])
         singel_input = {
@@ -95,6 +107,7 @@ def train_single_epoch(ds, model, sam, optimizer, transform, epoch):
     pbar = tqdm(ds)
     criterion = nn.BCELoss()
     Idim = int(args['Idim'])
+    NumSliceDim = int(args['NumSliceDim'])
     optimizer.zero_grad()
     for ix, (imgs, gts, original_sz, img_sz) in enumerate(pbar):
         orig_imgs = imgs.to(sam.device)
@@ -121,6 +134,7 @@ def inference_ds(ds, model, sam, transform, epoch, args):
     iou_list = []
     dice_list = []
     Idim = int(args['Idim'])
+    NumSliceDim = int(args['NumSliceDim'])
     for imgs, gts, original_sz, img_sz in pbar:
         orig_imgs = imgs.to(sam.device)
         gts = gts.to(sam.device)
@@ -164,6 +178,100 @@ def sam_call(batched_input, sam, dense_embeddings):
     )
     return low_res_masks
 
+class LungSegmentationDataset(Dataset):
+    def __init__(self, image_paths, mask_paths,batch_size, transform=None):
+        self.image_paths = image_paths
+        self.mask_paths = mask_paths
+        self.transform = transform
+        self.batch_size = batch_size
+
+    def __len__(self):
+        return len(self.image_paths)
+
+    def __getitem__(self, idx):
+        # Load the image (CT scan)
+        image = nib.load(self.image_paths[idx]).get_fdata()  # Load image as numpy array
+        original_sz = image.shape
+        original_sz = (original_sz[0], original_sz[1],3)
+
+        image = zoom(image, (512/image.shape[0], 512/image.shape[1], 115/image.shape[2]))
+        img_sz = image.shape
+        img_sz = (img_sz[0], img_sz[1],3)
+        
+        # Load the mask (segmentation)
+        mask = nib.load(self.mask_paths[idx]).get_fdata()  # Load mask as numpy array
+        mask = zoom(mask,(512/mask.shape[0], 512/mask.shape[1],115/mask.shape[2]))
+        
+        # Normalize image to zero mean and unit variance
+        image = (image - np.mean(image)) / np.std(image)
+
+        # Ensure the mask is binary (either 0 or 1)
+        mask = np.where(mask > 0.1, 1, 0).astype(np.float32)
+        
+        num_slices = image.shape[2]  # Assuming that slices are along the 3rd dimension
+        
+        # Lists to hold image and mask slices
+        num_slices = 3
+        #image_slices = np.empty((num_slices, image.shape[0], image.shape[1]), dtype=np.float32)
+        #mask_slices = np.empty((num_slices, mask.shape[0], mask.shape[1]), dtype=np.float32)
+
+        image_slices = []  # Use a list instead of np.empty
+        mask_slices = []   # Use a list instead of np.empty
+
+        
+        for slice_idx in range(num_slices):
+            #image_slices[slice_idx] = image[:, :, 89+slice_idx]
+            #mask_slices[slice_idx] = mask[:, :, 89+slice_idx]
+
+            image_slices.append(image[:, :, 89+slice_idx])
+            mask_slices.append(mask[:, :, 89+slice_idx])
+
+        image_slices = np.array(image_slices) 
+        mask_slices = np.array(mask_slices)
+
+        image_slices = torch.tensor(image_slices, dtype=torch.float32) # Shape: [115, 1, H, W]
+        mask_slices = torch.tensor(mask_slices, dtype=torch.float32)  # Shape: [115, 1, H, W]
+        
+        '''
+        num_batches = int(num_slices//self.batch_size)
+        image_batches = []
+        mask_batches = []
+
+        for i in range(num_slices):
+            start_idx = i * self.batch_size  # Start index for the batch
+            end_idx = start_idx + self.batch_size  # End index for the batch
+    
+            # Select the slices for the current batch
+            image_batch = image_slices[start_idx:end_idx]  # Shape: (batch_size, 1, H, W)
+            mask_batch = mask_slices[start_idx:end_idx]    # Shape: (batch_size, H, W)
+    
+            image_batches.append(image_batch)
+            mask_batches.append(mask_batch)
+
+        image_batches = torch.stack(image_batches)
+        mask_batches = torch.stack(mask_batches)
+        '''
+        print(original_sz)
+        print(img_sz)
+        return image_slices, mask_slices ,original_sz, img_sz
+
+
+def split_and_load_dataset(image_dir, mask_dir, val_size, batch_size, transform=None):
+    image_paths = sorted([os.path.join(image_dir, f) for f in os.listdir(image_dir) if f.endswith('.nii.gz') and not f.startswith('._')])
+    mask_paths = sorted([os.path.join(mask_dir, f) for f in os.listdir(mask_dir) if f.endswith('.nii.gz') and not f.startswith('._')])
+    
+    assert len(image_paths) == len(mask_paths), "The number of images and masks must be the same."
+    
+    train_images, test_images, train_masks, test_masks = train_test_split(image_paths, mask_paths, test_size=val_size, random_state=42)
+    
+    train_dataset = LungSegmentationDataset(train_images, train_masks,batch_size =3)
+    test_dataset = LungSegmentationDataset(test_images, test_masks,batch_size = 1)
+    
+    #train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    #test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+    
+    return train_dataset, test_dataset
+
 
 def main(args=None, sam_args=None):
     if torch.cuda.is_available():
@@ -177,19 +285,22 @@ def main(args=None, sam_args=None):
     optimizer = optim.Adam(model.parameters(),
                            lr=float(args['learning_rate']),
                            weight_decay=float(args['WD']))
+    '''
     if args['task'] == 'monu':
         trainset, testset = get_monu_dataset(args, sam_trans=transform)
     elif args['task'] == 'glas':
         trainset, testset = get_glas_dataset(args, sam_trans=transform)
     elif args['task'] == 'polyp':
         trainset, testset = get_polyp_dataset(args, sam_trans=transform)
-    ds = torch.utils.data.DataLoader(trainset, batch_size=int(args['Batch_size']), shuffle=True,
-                                     num_workers=int(args['nW']), drop_last=True)
-    ds_val = torch.utils.data.DataLoader(testset, batch_size=1, shuffle=False,
-                                         num_workers=int(args['nW_eval']), drop_last=False)
+    '''
+    trainset, testset = split_and_load_dataset(args['dataset_path'], args['mask_path'], val_size=0.2, batch_size=int(args['Batch_size']),transform=transform)
+    ds = torch.utils.data.DataLoader(trainset, batch_size=int(args['Batch_size']), shuffle=True,num_workers=int(args['nW']), drop_last=True)
+    ds_val = torch.utils.data.DataLoader(testset,batch_size=1, shuffle=False,num_workers=int(args['nW_eval']), drop_last=False)
+    
     best = 0
     path_best = 'results/gpu' + str(args['folder']) + '/best.csv'
     f_best = open(path_best, 'w')
+
     for epoch in range(int(args['epoches'])):
         train_single_epoch(ds, model.train(), sam.eval(), optimizer, transform, epoch)
         with torch.no_grad():
@@ -212,9 +323,14 @@ if __name__ == '__main__':
     parser.add_argument('-nW_eval', '--nW_eval', default=0, help='evaluation iteration', required=False)
     parser.add_argument('-WD', '--WD', default=1e-4, help='evaluation iteration', required=False)
     parser.add_argument('-task', '--task', default='glas', help='evaluation iteration', required=False)
+    
+    parser.add_argument('-dataset_path', '--dataset_path', default='/content/drive/My Drive/Msc/DeepLearning/Project/Task06_Lung/imagesTr', help='Path to the dataset', required=True)
+    parser.add_argument('-mask_path', '--mask_path', default='/content/drive/My Drive/Msc/DeepLearning/Project/Task06_Lung/labelsTr', help='Path to the mask dataset', required=True)
+    
     parser.add_argument('-depth_wise', '--depth_wise', default=False, help='image size', required=False)
     parser.add_argument('-order', '--order', default=85, help='image size', required=False)
     parser.add_argument('-Idim', '--Idim', default=512, help='image size', required=False)
+    parser.add_argument('-NumSliceDim', '--NumSliceDim', default=115, help='image size', required=False)
     parser.add_argument('-rotate', '--rotate', default=22, help='image size', required=False)
     parser.add_argument('-scale1', '--scale1', default=0.75, help='image size', required=False)
     parser.add_argument('-scale2', '--scale2', default=1.25, help='image size', required=False)
@@ -231,7 +347,7 @@ if __name__ == '__main__':
     args['vis_folder'] = os.path.join('results', 'gpu' + args['folder'], 'vis')
     os.mkdir(args['vis_folder'])
     sam_args = {
-        'sam_checkpoint': "cp/sam_vit_h.pth",
+        'sam_checkpoint': "/content/drive/My Drive/Msc/DeepLearning/Project/sam_vit_h.pth",
         'model_type': "vit_h",
         'generator_args': {
             'points_per_side': 8,
