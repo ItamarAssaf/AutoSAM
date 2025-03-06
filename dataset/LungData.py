@@ -218,7 +218,7 @@ class ImageLoader(torch.utils.data.Dataset):
 
 
 def get_lung_dataset(args, sam_trans):
-    datadir = '/content/drive/My Drive/Msc/DeepLearning/Project/Task06_Lung/imagesTr'
+    datadir = '/content/drive/My Drive/Abdomen'
     transform_train, transform_test = get_lung_transform(args)
     ds_train = ImageLoader(datadir, train=True, transform=transform_train, sam_trans=sam_trans, loops=5)
     ds_test = ImageLoader(datadir, train=False, transform=transform_test, sam_trans=sam_trans)
