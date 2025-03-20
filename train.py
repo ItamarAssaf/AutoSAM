@@ -26,11 +26,11 @@ from dataset.LungData import get_lung_dataset
 from segment_anything import SamPredictor, sam_model_registry, SamAutomaticMaskGenerator
 from segment_anything.utils.transforms import ResizeLongestSide
 import torch.nn.functional as F
-# from sam2.build_sam import build_sam2_video_predictor
+from sam2.build_sam import build_sam2_video_predictor
 
-# from hydra import initialize_config_dir, compose
-# from omegaconf import OmegaConf
-# from hydra.core.global_hydra import GlobalHydra
+from hydra import initialize_config_dir, compose
+from omegaconf import OmegaConf
+from hydra.core.global_hydra import GlobalHydra
 
 def norm_batch(x):
     bs = x.shape[0]
@@ -150,42 +150,39 @@ def train_single_epoch3D(ds, model, sam, optimizer, transform, epoch):
         orig_imgs = imgs.to(sam.device)
         gts = gts.to(sam.device)
 
+        # Ensure orig_imgs shape is (B, C, D, H, W)
         if orig_imgs.ndim == 4:
+            # Assuming shape is (B, D, H, W), add channel dimension
             orig_imgs = orig_imgs.unsqueeze(1)
         elif orig_imgs.shape[1] not in [1, 3]:
-            orig_imgs = orig_imgs.permute(0, 4, 1, 2, 3)
+            print("error in dimentions!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+            # If dimension order is incorrect, permute
+            orig_imgs = orig_imgs.permute(0, 4, 1, 2, 3)  # Example correction if needed
 
         orig_imgs_small = F.interpolate(orig_imgs, size=(NumSliceDim, Idim, Idim), mode='trilinear', align_corners=True)
+        # Adding RGB dimentions
         if orig_imgs_small.shape[1] == 1:
             orig_imgs_small = orig_imgs_small.repeat(1, 3, 1, 1, 1)
-
+        # Calling ResNet
+        print("calling dense embedding")
         dense_embeddings = model(orig_imgs_small)
+        print("Done calling dense embedding")
 
-        # Perform memory-friendly interpolation
-        dense_embeddings = dense_embeddings.float()
-        dense_embeddings_split = []
-        for i in range(dense_embeddings.shape[0]):
-            emb = dense_embeddings[i:i+1]
-            emb_interp = F.interpolate(
-                emb,
-                size=(orig_imgs.shape[2], dense_embeddings.shape[3], dense_embeddings.shape[4]),
-                mode='trilinear',
-                align_corners=True
-            )
-            dense_embeddings_split.append(emb_interp)
-        dense_embeddings = torch.cat(dense_embeddings_split, dim=0).half()
+        print("calling input dict")
+        batched_input = get_input_dict(orig_imgs, original_sz, img_sz)  # You might need to adjust this if still 2D
+        print("Done calling input dict")
+        print("calling sam and norm batch")
+        masks = norm_batch(sam_call3D(batched_input, sam, dense_embeddings))  # Call the 3D-adjusted SAM
+        print("Done calling sam and norm batch")
 
-        batched_input = get_input_dict(orig_imgs, original_sz, img_sz)
-        masks = norm_batch(sam_call3D(batched_input, sam, dense_embeddings))
-
+        print("calling gen step")
         loss = gen_step(optimizer, gts, masks, criterion, accumulation_steps=4, step=ix)
+        print("Done calling gen step")
         loss_list.append(loss)
         pbar.set_description(
             f'(train) epoch {epoch} :: loss {np.mean(loss_list):.4f}'
         )
     return np.mean(loss_list)
-
-
 
 
 def inference_ds(ds, model, sam, transform, epoch, args):
@@ -271,24 +268,63 @@ def sam_call(batched_input, sam, dense_embeddings): # Change to sam2
     )
     return low_res_masks
 
-
 # def sam_call3D(batched_input, sam, dense_embeddings):
 #     with torch.no_grad():
 #         low_res_masks_3D = []
 
 #         for batch_idx, x in enumerate(batched_input):
 #             image = x["image"]  # Shape: [C, D, H, W]
+#             print(f"Processing batch {batch_idx}, image shape: {image.shape}")
+#             mask_slices = []
+
+#             for d in range(image.shape[1]):
+#                 slice_img = image[:, d, :, :].unsqueeze(0).float()  # [1, C, H, W], ensure float32
+#                 slice_img = slice_img.repeat(1, 3, 1, 1)   # [1, 3, H, W]
+#                 print(f"  Processing slice {d}, slice_img shape: {slice_img.shape}")
+#                 image_embeddings = sam.image_encoder(slice_img)
+
+#                 sparse_embeddings_none, _ = sam.prompt_encoder(points=None, boxes=None, masks=None)
+
+#                 low_res_mask, _ = sam.mask_decoder(
+#                     image_embeddings=image_embeddings,
+#                     image_pe=sam.prompt_encoder.get_dense_pe(),
+#                     sparse_prompt_embeddings=sparse_embeddings_none,
+#                     dense_prompt_embeddings=dense_embeddings[batch_idx, :, d, :, :].unsqueeze(0),
+#                     multimask_output=False,
+#                 )
+
+#                 print(f"  Slice {d} mask shape: {low_res_mask.shape}")
+#                 mask_slices.append(low_res_mask.squeeze(1))
+
+#             full_mask = torch.stack(mask_slices, dim=2)  # Stack on depth
+#             print(f"Batch {batch_idx} full mask shape: {full_mask.shape}")
+#             low_res_masks_3D.append(full_mask)
+
+#         result = torch.stack(low_res_masks_3D, dim=0)  # [B, 1, D, H, W]
+#         print(f"Final batched masks shape: {result.shape}")
+#         return result
+
+# def sam_call3D(batched_input, sam, dense_embeddings):
+#     with torch.no_grad():
+#         low_res_masks_3D = []
+
+#         for batch_idx, x in enumerate(batched_input):
+#             image = x["image"]  # [C, D, H, W]
 #             C, D, H, W = image.shape
+
+#             print(f"Processing batch {batch_idx}, image shape: {image.shape}")
 #             mask_slices = []
 
 #             for d in range(D):
-#                 slice_img = image[:, d, :, :].unsqueeze(0).float()  # [1, C, H, W]
-#                 if slice_img.shape[1] == 1:
-#                     slice_img = slice_img.repeat(1, 3, 1, 1)  # convert grayscale to RGB
+#                 slice_img = image[:, d, :, :].unsqueeze(0)  # [1, C, H, W]
 
-#                 # Get embeddings as dict and extract
-#                 embeddings_dict = sam.image_encoder(slice_img)
-#                 image_embeddings = embeddings_dict["image_embeddings"].clone()
+#                 if slice_img.shape[1] == 1:
+#                     slice_img = slice_img.repeat(1, 3, 1, 1)  # Convert grayscale to RGB
+
+#                 slice_img = slice_img.float()  # <--- KEEP THIS, as you insisted!
+
+#                 print(f"  Processing slice {d}, slice_img shape: {slice_img.shape}")
+#                 image_embeddings = sam.image_encoder(slice_img)
 
 #                 sparse_embeddings_none, _ = sam.sam_prompt_encoder(points=None, boxes=None, masks=None)
 
@@ -298,16 +334,18 @@ def sam_call(batched_input, sam, dense_embeddings): # Change to sam2
 #                     sparse_prompt_embeddings=sparse_embeddings_none,
 #                     dense_prompt_embeddings=dense_embeddings[batch_idx, :, d, :, :].unsqueeze(0),
 #                     multimask_output=False,
-#                     repeat_image=False,  # keep as False for this slice-by-slice approach
+#                     repeat_image=input_images
 #                 )
 
+#                 print(f"  Slice {d} mask shape: {low_res_mask.shape}")
 #                 mask_slices.append(low_res_mask.squeeze(1))
 
 #             full_mask = torch.stack(mask_slices, dim=2)  # [1, H, D, W]
-#             full_mask = full_mask.unsqueeze(0)  # Add batch dimension
+#             print(f"Batch {batch_idx} full mask shape: {full_mask.shape}")
 #             low_res_masks_3D.append(full_mask)
 
-#         result = torch.cat(low_res_masks_3D, dim=0)  # [B, 1, D, H, W]
+#         result = torch.stack(low_res_masks_3D, dim=0)  # [B, 1, D, H, W]
+#         print(f"Final batched masks shape: {result.shape}")
 #         return result
 
 def sam_call3D(batched_input, sam, dense_embeddings):
@@ -320,46 +358,33 @@ def sam_call3D(batched_input, sam, dense_embeddings):
             mask_slices = []
 
             for d in range(D):
-                slice_img = image[:, d, :, :].unsqueeze(0).float()  # [1, C, H, W]
+                torch.compiler.cudagraph_mark_step_begin()
+                slice_img = image[:, d, :, :].unsqueeze(0).float()
                 if slice_img.shape[1] == 1:
-                    slice_img = slice_img.repeat(1, 3, 1, 1)  # convert grayscale to RGB
+                    slice_img = slice_img.repeat(1, 3, 1, 1)
 
-                # Preprocess to the size expected by SAM
-                slice_img_resized = sam.preprocess(slice_img.squeeze(0))  # [3, 1024, 1024]
-                slice_img_resized = slice_img_resized.unsqueeze(0)  # [1, 3, 1024, 1024]
+                embeddings_dict = sam.image_encoder(slice_img)
+                image_embeddings = embeddings_dict["image_embeddings"].clone()
 
-                # Now get embeddings
-                image_embeddings = sam.image_encoder(slice_img_resized)
+                sparse_embeddings_none, _ = sam.sam_prompt_encoder(points=None, boxes=None, masks=None)
 
-
-                # Resize dense embedding slice to match image embedding spatial dims:
-                dense_emb_slice = dense_embeddings[batch_idx, :, d, :, :].unsqueeze(0)  # [1, C, H, W]
-                dense_emb_slice_resized = F.interpolate(
-                    dense_emb_slice,
-                    size=(image_embeddings.shape[-2], image_embeddings.shape[-1]),
-                    mode='bilinear',
-                    align_corners=False
-                )
-
-                # Prompt embeddings
-                sparse_embeddings_none, _ = sam.prompt_encoder(points=None, boxes=None, masks=None)
-
-                # Decode mask
-                low_res_mask, _ = sam.mask_decoder(
+                torch.compiler.cudagraph_mark_step_begin()
+                low_res_mask, _ = sam.sam_mask_decoder(
                     image_embeddings=image_embeddings,
-                    image_pe=sam.prompt_encoder.get_dense_pe(),
+                    image_pe=sam.sam_prompt_encoder.get_dense_pe(),
                     sparse_prompt_embeddings=sparse_embeddings_none,
-                    dense_prompt_embeddings=dense_emb_slice_resized,
+                    dense_prompt_embeddings=dense_embeddings[batch_idx, :, d, :, :].unsqueeze(0).clone(),
                     multimask_output=False,
+                    repeat_image=False,
                 )
 
                 mask_slices.append(low_res_mask.squeeze(1))
 
-            full_mask = torch.stack(mask_slices, dim=2)  # [1, H, D, W]
-            full_mask = full_mask.unsqueeze(0)  # Add batch dimension
+            full_mask = torch.stack(mask_slices, dim=2)
+            full_mask = full_mask.unsqueeze(0)
             low_res_masks_3D.append(full_mask)
 
-        result = torch.cat(low_res_masks_3D, dim=0)  # [B, 1, D, H, W]
+        result = torch.cat(low_res_masks_3D, dim=0)
         return result
 
 
@@ -375,36 +400,33 @@ def main(args=None, sam_args=None):
     model = ModelEmb3D(args=args).to(device)
     model = model.half()  # Use half precision for lower memory usage
 
-    # # 🔹 Ensure the config file exists
-    # if not os.path.exists(sam_args['config_file']):
-    #     raise FileNotFoundError(f"Config file not found: {sam_args['config_file']}")
+    # 🔹 Ensure the config file exists
+    if not os.path.exists(sam_args['config_file']):
+        raise FileNotFoundError(f"Config file not found: {sam_args['config_file']}")
 
-    # # 🔹 Ensure the checkpoint file exists
-    # if not os.path.exists(sam_args['sam_checkpoint']):
-    #     raise FileNotFoundError(f"Checkpoint file not found: {sam_args['sam_checkpoint']}")
+    # 🔹 Ensure the checkpoint file exists
+    if not os.path.exists(sam_args['sam_checkpoint']):
+        raise FileNotFoundError(f"Checkpoint file not found: {sam_args['sam_checkpoint']}")
 
-    # config_dir = os.path.dirname(sam_args['config_file'])  
+    config_dir = os.path.dirname(sam_args['config_file'])  
 
-    # if not os.path.exists(config_dir):
-    #     raise FileNotFoundError(f"Config directory not found: {config_dir}")
+    if not os.path.exists(config_dir):
+        raise FileNotFoundError(f"Config directory not found: {config_dir}")
 
-    # if GlobalHydra.instance().is_initialized():
-    #     GlobalHydra.instance().clear()
+    if GlobalHydra.instance().is_initialized():
+        GlobalHydra.instance().clear()
 
-    # initialize_config_dir(config_dir)
-    # cfg = compose(config_name=os.path.basename(sam_args['config_file']).replace(".yaml", ""))
-    # print("Loaded Config:", OmegaConf.to_yaml(cfg))
+    initialize_config_dir(config_dir)
+    cfg = compose(config_name=os.path.basename(sam_args['config_file']).replace(".yaml", ""))
+    print("Loaded Config:", OmegaConf.to_yaml(cfg))
 
-    # sam = build_sam2_video_predictor(
-    #     config_file=os.path.basename(sam_args['config_file']).replace(".yaml", ""),
-    #     ckpt_path=None,
-    #     device=device,
-    #     mode="eval",
-    #     vos_optimized=True
-    # )
-
-    sam = sam_model_registry[sam_args['model_type']](checkpoint=sam_args['sam_checkpoint'])
-    sam.to(device=device)
+    sam = build_sam2_video_predictor(
+        config_file=os.path.basename(sam_args['config_file']).replace(".yaml", ""),
+        ckpt_path=None,
+        device=device,
+        mode="eval",
+        vos_optimized=True
+    )
 
     checkpoint = torch.load(sam_args['sam_checkpoint'], map_location="cpu")
     valid_keys = set(sam.state_dict().keys())
@@ -491,26 +513,10 @@ if __name__ == '__main__':
                                      'net_best.pth')
     args['vis_folder'] = os.path.join('results', 'gpu' + args['folder'], 'vis')
     os.mkdir(args['vis_folder'])
-    # sam_args = {
-    #     'sam_checkpoint': "/content/sam2/checkpoints/sam2.1_hiera_large.pt",  # ✅ Choose the correct checkpoint
-    #     'config_file': "/content/sam2/sam2/configs/sam2.1/sam2.1_hiera_l.yaml",  # ✅ Correct config file
-    #     'vos_optimized': True  # ✅ Enable video segmentation mode
-    # }
-
     sam_args = {
-        'sam_checkpoint': "/content/drive/My Drive/Msc/DeepLearning/Project/sam_vit_h.pth",
-        'model_type': "vit_h",
-        'generator_args': {
-            'points_per_side': 8,
-            'pred_iou_thresh': 0.95,
-            'stability_score_thresh': 0.7,
-            'crop_n_layers': 0,
-            'crop_n_points_downscale_factor': 2,
-            'min_mask_region_area': 0,
-            'point_grids': None,
-            'box_nms_thresh': 0.7,
-        },
-        'gpu_id': 0,
+        'sam_checkpoint': "/content/sam2/checkpoints/sam2.1_hiera_large.pt",  # ✅ Choose the correct checkpoint
+        'config_file': "/content/sam2/sam2/configs/sam2.1/sam2.1_hiera_l.yaml",  # ✅ Correct config file
+        'vos_optimized': True  # ✅ Enable video segmentation mode
     }
 
     main(args=args, sam_args=sam_args)
