@@ -26,7 +26,7 @@ def cv2_loader(path, is_mask):
 def nib_loader(path, is_mask):
     if is_mask:
         img = nib.load(path).get_fdata()
-        img = np.where(img > 0.1, 1, 0).astype(np.float16)
+        img = np.where(img > 0.1, 1, 0).astype(np.float32)
     else:
         img = nib.load(path).get_fdata()
     return img
@@ -82,46 +82,64 @@ class ImageLoader(torch.utils.data.Dataset):
 
         return chunks
 
-    def preload_all_volumes_as_is(self, chunk_depth=32, downscale_factor=(0.5, 0.5, 1.0), train = False):
+    def save_volume_as_video(self,volume_tensor, save_path):
+        """
+        Save a 3D volume (tensor of shape [D, H, W]) as a grayscale MP4 video.
+        """
+        D, H, W = volume_tensor.shape
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        video_writer = cv2.VideoWriter(save_path, fourcc, 4, (W, H), isColor=False)
 
+        for i in range(D):
+            frame = volume_tensor[i].cpu().numpy()
+            frame = ((frame - frame.min()) / (frame.max() - frame.min()) * 255).astype(np.uint8)
+            frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+            video_writer.write(frame)
+
+        video_writer.release()
+        print(f"🎥 Saved video at: {save_path}")
+
+    def preload_all_volumes_as_is(self, downscale_factor=(0.5, 0.5, 1.0), train=False):
         if train:
-            cache_path = '/content/drive/My Drive/Abdomen/abdopreloaded_lung_chunks.pt'
+            cache_dir = '/content/drive/My Drive/Abdomen/preloaded_volumes_train'
         else:
-            cache_path = '/content/drive/My Drive/Abdomen/abdopreloaded_lung_chunks_test.pt'
+            cache_dir = '/content/drive/My Drive/Abdomen/preloaded_volumes_test'
 
-        # ✅ Check if cached data exists
-        if os.path.exists(cache_path):
-            print(f"⚡ Loading preprocessed data from cache: {cache_path}")
-            return torch.load(cache_path)
+        os.makedirs(cache_dir, exist_ok=True)
+        all_volumes = []
 
-        all_chunks = []
-        print("Loading volumes and slicing into chunks:")
-        for file_idx, file_path in enumerate(tqdm(self.paths, desc="Loading volumes")):
+        print("Loading full volumes and saving (with existence check):")
+        for file_idx, file_path in enumerate(tqdm(self.paths, desc="Loading full volumes")):
+            volume_pt_path = os.path.join(cache_dir, f"volume_{file_idx}.pt")
+
+            # ✅ Check if .pt file already exists
+            if os.path.exists(volume_pt_path):
+                print(f"⚡ Volume {file_idx} already cached. Skipping.")
+                volume_data = torch.load(volume_pt_path)
+                all_volumes.append(volume_data)
+                continue
+
+            # Load and process
             img = self.loader(os.path.join(self.imgs_root, file_path), is_mask=False).astype(np.float32)
             mask = self.loader(os.path.join(self.masks_root, self.mask_paths[file_idx]), is_mask=True).astype(np.float32)
 
-            # Perform downscaling in float32
-            img = zoom(img, downscale_factor, order=3)    # cubic interpolation for images
-            mask = zoom(mask, downscale_factor, order=0)  # nearest for masks
+            # Downscale
+            img = zoom(img, downscale_factor, order=3)
+            mask = zoom(mask, downscale_factor, order=0)
 
-            img_chunks = self.chunk_volume(img, chunk_depth)
-            mask_chunks = self.chunk_volume(mask, chunk_depth)
+            img_tensor = torch.tensor(img, dtype=torch.float32)
+            mask_tensor = torch.tensor(mask, dtype=torch.float32)
+            original_size = torch.tensor(img_tensor.shape)
+            img_size = torch.tensor(img_tensor.shape)
 
-            for i, (img_chunk, mask_chunk) in enumerate(zip(img_chunks, mask_chunks)):
-                img_tensor = torch.tensor(img_chunk, dtype=torch.float16)
-                mask_tensor = torch.tensor(mask_chunk, dtype=torch.float16)
-                original_size = torch.tensor(img_tensor.shape)
-                img_size = torch.tensor(img_tensor.shape)
-                all_chunks.append((img_tensor, mask_tensor, original_size, img_size))
+            # Save .pt file
+            torch.save((img_tensor, mask_tensor, original_size, img_size), volume_pt_path)
+            print(f"💾 Saved volume tensor at: {volume_pt_path}")
 
-        print(f"✅ Done! Total chunks loaded: {len(all_chunks)}")
+            all_volumes.append((img_tensor, mask_tensor, original_size, img_size))
 
-        # ✅ Save to cache for future runs
-        print(f"💾 Saving preprocessed chunks to {cache_path}")
-        torch.save(all_chunks, cache_path)
-
-        return all_chunks
-
+        print(f"✅ Done! Total volumes processed or loaded from cache: {len(all_volumes)}")
+        return all_volumes
 
     def preload_all_slices(self):
         all_slices = []
@@ -164,7 +182,9 @@ class ImageLoader(torch.utils.data.Dataset):
 
 
     def __getitem__(self, index):
-        return self.all_volumes[index % len(self.all_volumes)]
+        img_tensor, mask_tensor, original_size, img_size = self.all_volumes[index % len(self.all_volumes)]
+        return img_tensor, mask_tensor, original_size, img_size
+
 
 #        return self.all_slices[index % len(self.all_slices)]
 
