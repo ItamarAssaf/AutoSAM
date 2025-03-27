@@ -101,9 +101,9 @@ class ImageLoader(torch.utils.data.Dataset):
 
     def preload_all_volumes_as_is(self, downscale_factor=(0.5, 0.5, 1.0), train=False):
         if train:
-            cache_dir = '/content/drive/My Drive/Abdomen/preloaded_volumes_train'
+            cache_dir = '/media/cilab/DATA/Hila/Data/Projects/AutoSAM'
         else:
-            cache_dir = '/content/drive/My Drive/Abdomen/preloaded_volumes_test'
+            cache_dir = '/media/cilab/DATA/Hila/Data/Projects/AutoSAM'
 
         os.makedirs(cache_dir, exist_ok=True)
         all_volumes = []
@@ -121,11 +121,30 @@ class ImageLoader(torch.utils.data.Dataset):
 
             # Load and process
             img = self.loader(os.path.join(self.imgs_root, file_path), is_mask=False).astype(np.float32)
-            mask = self.loader(os.path.join(self.masks_root, self.mask_paths[file_idx]), is_mask=True).astype(np.float32)
+            mask = self.loader(os.path.join(self.masks_root, self.mask_paths[file_idx]), is_mask=False).astype(np.float32)
+            mask = (mask == 6)
+            mask = mask.astype(float)
 
             # Downscale
-            img = zoom(img, downscale_factor, order=3)
-            mask = zoom(mask, downscale_factor, order=0)
+            #img = zoom(img, downscale_factor, order=1)
+            #mask = zoom(mask, downscale_factor, order=1)
+            img = zoom(img, (256 / img.shape[0], 256 / img.shape[1], 92 / img.shape[2]))
+            mask = zoom(mask, (256 / mask.shape[0], 256 / mask.shape[1], 92 / mask.shape[2]))
+
+            mask[mask >= 0.5] = 1
+            mask[mask <= 0.5] = 0
+
+            fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+            # Display the image slice
+            axes[0].imshow(img[:,:,50], cmap="gray")
+            axes[0].set_title("CT Scan Slice")
+            axes[0].axis("off")  # Hide axes
+
+            axes[1].imshow(mask[:,:,50], cmap="gray")
+            axes[1].set_title("Segmentation Mask Slice")
+            axes[1].axis("off")  # Hide axes
+            plt.show()
+
 
             img_tensor = torch.tensor(img, dtype=torch.float32)
             mask_tensor = torch.tensor(mask, dtype=torch.float32)
@@ -146,7 +165,9 @@ class ImageLoader(torch.utils.data.Dataset):
         for file_idx, file_path in enumerate(self.paths):
             # Construct the full path to the image and mask files
             img = self.loader(os.path.join(self.imgs_root, file_path), is_mask=False)
-            mask = self.loader(os.path.join(self.masks_root, self.mask_paths[file_idx]), is_mask=True)
+            mask = self.loader(os.path.join(self.masks_root, self.mask_paths[file_idx]), is_mask=False)
+            mask = (mask == 6)
+            mask = mask.astype(float)
 
             # Resize the image and mask to 256x256x120
             img = zoom(img, (96 / img.shape[0], 96 / img.shape[1], 96 / img.shape[2]))
@@ -158,7 +179,7 @@ class ImageLoader(torch.utils.data.Dataset):
                 mask_slice = mask[:, :, i]  # Get the corresponding mask slice
 
                 # Convert to 3-channel (RGB) image
-                img_slice = np.stack([img_slice] * 3, axis=-1)  # (256, 256, 3)
+                img_slice = np.stack([img_slice *1/3] * 3, axis=-1)  # (256, 256, 3)
 
                 # Apply transformations
                 img_slice, mask_slice = self.transform(img_slice, mask_slice)
@@ -167,8 +188,21 @@ class ImageLoader(torch.utils.data.Dataset):
                     mask_slice)
 
                 # Process mask to binary format
-                mask_slice[mask_slice > 0.1] = 1
-                mask_slice[mask_slice <= 0.1] = 0
+                mask_slice[mask_slice > 0.5] = 1
+                mask_slice[mask_slice <= 0.5] = 0
+
+
+                fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+                # Display the image slice
+                axes[0].imshow(img_slice, cmap="gray")
+                axes[0].set_title("CT Scan Slice")
+                axes[0].axis("off")  # Hide axes
+
+                axes[1].imshow(mask_slice, cmap="gray")
+                axes[1].set_title("Segmentation Mask Slice")
+                axes[1].axis("off")  # Hide axes
+                plt.show()
+
                 image_size = tuple(img_slice.shape[1:3])  # (256, 256)
 
                 # Store the processed slice and metadata as a tuple
@@ -218,7 +252,7 @@ class ImageLoader(torch.utils.data.Dataset):
 
 
 def get_lung_dataset(args, sam_trans):
-    datadir = '/content/drive/My Drive/Abdomen'
+    datadir = '/media/cilab/DATA/Hila/Data/Projects/AutoSAM/Abdomen'
     transform_train, transform_test = get_lung_transform(args)
     ds_train = ImageLoader(datadir, train=True, transform=transform_train, sam_trans=sam_trans, loops=5)
     ds_test = ImageLoader(datadir, train=False, transform=transform_test, sam_trans=sam_trans)

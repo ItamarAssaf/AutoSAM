@@ -20,7 +20,7 @@ import numpy as np
 from sklearn.model_selection import train_test_split
 from scipy.ndimage import zoom
 from scipy.ndimage import label
-from google.colab import drive
+#from google.colab import drive
 import matplotlib.pyplot as plt
 import re
 from models.model_single import ModelEmb, ModelEmb3D
@@ -198,7 +198,19 @@ def train_single_epoch3D(ds, model, sam, optimizer, transform, epoch, scaler):
                 return np.mean(loss_list) if loss_list else 0
 
             try:
-                img_tensor, gts, original_sz, _, _ = sample
+                img_tensor, gts, original_sz, _ = sample
+
+                fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+                # Display the image slice
+                axes[0].imshow(img_tensor[:, :, 50], cmap="gray")
+                axes[0].set_title("CT Scan Slice")
+                axes[0].axis("off")  # Hide axes
+
+                axes[1].imshow(gts[:, :, 50], cmap="gray")
+                axes[1].set_title("Segmentation Mask Slice")
+                axes[1].axis("off")  # Hide axes
+                plt.show()
+
                 orig_img = img_tensor.to(sam.device)
                 gts = gts.to(sam.device)
 
@@ -226,7 +238,7 @@ def train_single_epoch3D(ds, model, sam, optimizer, transform, epoch, scaler):
                 # Dense embedding
                 dense_embeddings = model(orig_imgs_small)
 
-                for slice_idx in range(32):
+                for slice_idx in range(92):
                     with torch.cuda.amp.autocast():
                         current_slice = orig_imgs_small[:,:,slice_idx,:,:]
                         current_dense_embeddings = dense_embeddings[:,:,slice_idx,:,:]
@@ -512,7 +524,7 @@ def main(args=None, sam_args=None):
         drop_last=False)
 
     # ✅ Set up save directory in Google Drive
-    base_save_dir = "/content/drive/My Drive/AutoSAM_results"
+    base_save_dir = "/media/cilab/DATA/Hila/Data/Projects/AutoSAM/results"
     os.makedirs(base_save_dir, exist_ok=True)
 
     results_dir = os.path.join(base_save_dir, f'gpu{args["folder"]}')
@@ -550,19 +562,19 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Description of your program')
     parser.add_argument('-lr', '--learning_rate', default=0.0003, help='learning_rate', required=False)
     parser.add_argument('-bs', '--Batch_size', default=3, help='batch_size', required=False)
-    parser.add_argument('-epoches', '--epoches', default=1, help='number of epoches', required=False)
+    parser.add_argument('-epoches', '--epoches', default=20, help='number of epoches', required=False)
     parser.add_argument('-nW', '--nW', default=0, help='evaluation iteration', required=False)
     parser.add_argument('-nW_eval', '--nW_eval', default=0, help='evaluation iteration', required=False)
     parser.add_argument('-WD', '--WD', default=1e-4, help='evaluation iteration', required=False)
     parser.add_argument('-task', '--task', default='glas', help='evaluation iteration', required=False)
     
-    parser.add_argument('-dataset_path', '--dataset_path', default='/content/drive/My Drive/Msc/DeepLearning/Project/Task06_Lung/imagesTr', help='Path to the dataset', required=False)
-    parser.add_argument('-mask_path', '--mask_path', default='/content/drive/My Drive/Msc/DeepLearning/Project/Task06_Lung/labelsTr', help='Path to the mask dataset', required=False)
+    parser.add_argument('-dataset_path', '--dataset_path', default='/media/cilab/DATA/Hila/Data/Projects/AutoSAM/Abdomen/Training/img"', help='Path to the dataset', required=False)
+    parser.add_argument('-mask_path', '--mask_path', default=' /media/cilab/DATA/Hila/Data/Projects/AutoSAM/Abdomen/Training/mask', help='Path to the mask dataset', required=False)
 
     parser.add_argument('-depth_wise', '--depth_wise', default=False, help='image size', required=False)
     parser.add_argument('-order', '--order', default=85, help='image size', required=False)
-    parser.add_argument('-Idim', '--Idim', default=64, help='image size', required=False)
-    parser.add_argument('-NumSliceDim', '--NumSliceDim', default=32, help='image size', required=False)
+    parser.add_argument('-Idim', '--Idim', default=512, help='image size', required=False)
+    parser.add_argument('-NumSliceDim', '--NumSliceDim', default=92, help='image size', required=False)
     parser.add_argument('-rotate', '--rotate', default=22, help='image size', required=False)
     parser.add_argument('-scale1', '--scale1', default=0.75, help='image size', required=False)
     parser.add_argument('-scale2', '--scale2', default=1.25, help='image size', required=False)
@@ -577,7 +589,7 @@ if __name__ == '__main__':
                                      'gpu' + folder,
                                      'net_best.pth')
     args['vis_folder'] = os.path.join('results', 'gpu' + args['folder'], 'vis')
-    args['debug_mode'] = True
+    args['debug_mode'] = False
     os.mkdir(args['vis_folder'])
     # sam_args = {
     #     'sam_checkpoint': "/content/sam2/checkpoints/sam2.1_hiera_large.pt",  # ✅ Choose the correct checkpoint
@@ -586,7 +598,7 @@ if __name__ == '__main__':
     # }
 
     sam_args = {
-        'sam_checkpoint': "/content/drive/My Drive/sam_vit_h.pth",
+        'sam_checkpoint': "/media/cilab/DATA/Hila/Data/Projects/AutoSAM/sam_vit_h.pth",
         'model_type': "vit_h",
         'generator_args': {
             'points_per_side': 8,
