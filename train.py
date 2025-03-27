@@ -118,20 +118,21 @@ def gen_step(optimizer, gts, masks, criterion, accumulation_steps, step, model, 
 
     loss.backward()
 
-    # Gradient check every 10 steps
-    if (step + 2) % accumulation_steps == 0 and debug:
-        for name, param in model.named_parameters():
-            if name.startswith("backbone."):
-                continue
-            if param.grad is not None:
-                if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
-                    print(f"⚠ NaN or Inf detected in gradients of: {name}")
-            else:
-                print(f"⚠ No gradients for: {name}")
+    # # Gradient check every 10 steps
+    # if (step + 2) % 1 == 0 and debug:
+    #     for name, param in model.named_parameters():
+    #         # print(f'{name}: {param.dtype}')
+    #         if name.startswith("backbone."):
+    #             continue
+    #         if param.grad is not None:
+    #             if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+    #                 print(f"⚠ NaN or Inf detected in gradients of: {name}")
+    #         else:
+    #             print(f"⚠ No gradients for: {name}, requires_grad:{param.requires_grad}")
 
-    if (step + 1) % accumulation_steps == 0:
-        optimizer.step()
-        optimizer.zero_grad()
+    # if (step + 1) % accumulation_steps == 0:
+    optimizer.step()
+    optimizer.zero_grad()
 
     return loss.item()
 
@@ -206,6 +207,9 @@ def train_single_epoch3D(ds, model, sam, optimizer, transform, epoch, mask_refin
     consecutive_failures = 0
     max_failures = 10
 
+    save_dir = '/content/drive/MyDrive/segmentation_debug_training'
+    os.makedirs(save_dir, exist_ok=True)
+    i = 0
     for ix, batch in enumerate(pbar):
         # batch is a list of tuples: (img_tensor, mask_tensor, original_size, img_size, video_path)
         for sample in batch:
@@ -224,11 +228,16 @@ def train_single_epoch3D(ds, model, sam, optimizer, transform, epoch, mask_refin
                     print(f"⚠ Volume depth {volume_depth} < NumSliceDim {NumSliceDim}, skipping...")
                     continue
 
+                if gts.max() < 0.9:
+                    continue
                 start_frame = np.random.randint(0, volume_depth - NumSliceDim + 1)
                 selected_slices = orig_img[:, :, start_frame:start_frame+NumSliceDim]
                 selected_gts = gts[:, :, start_frame:start_frame+NumSliceDim]
                 selected_slices = selected_slices.permute(2, 0, 1)
                 selected_gts = selected_gts.permute(2, 0, 1).unsqueeze(0)
+
+                if selected_gts.max() < 0.9:
+                    continue
 
                 # Resize and adjust
                 orig_imgs_small = F.interpolate(
@@ -256,22 +265,18 @@ def train_single_epoch3D(ds, model, sam, optimizer, transform, epoch, mask_refin
                 loss = gen_step(optimizer, selected_gts, mask, criterion, accumulation_steps=4, step=ix, model=model)
                 loss_list.append(loss)
 
-                # 🔍 Gradient sanity check (every 10 layers only)
-                for idx, (name, param) in enumerate(model.named_parameters()):
-                    if not param.requires_grad:
-                        continue
-                    if idx % 10 == 0:
-                        if param.grad is not None:
-                            if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
-                                print(f"⚠ NaN or Inf detected in gradients of: {name}")
-                            elif param.grad.abs().sum() == 0:
-                                print(f"⚠ Zero gradients in: {name}")
-                        else:
-                            print(f"⚠ No gradients for: {name}")
-
-
                 # Reset failures after success
                 consecutive_failures = 0
+
+                if (i % 5 == 0):
+                    np.savez_compressed(
+                        os.path.join(save_dir, f'debug_volume{i}.npz'),
+                        image=selected_slices.squeeze().detach().cpu().numpy(),
+                        mask=mask.squeeze().detach().cpu().numpy(),
+                        gt=selected_gts.squeeze().detach().cpu().numpy()  # 👈 add this line
+                    )
+                    print("✅ Saved debug volume to Drive")
+                i += 1
 
             except Exception as e:
                 print(f"⚠ Exception encountered: {e}, skipping this sample.")
@@ -333,12 +338,12 @@ def inference_ds(ds, model, sam, transform, epoch, args, mask_refinement):
             else:
                 mask = torch.cat((mask, temp_mask), dim=2)
 
-        # Post-process and resize GT for fair comparison
-        masks_resized = torch.sigmoid(mask)
-        masks_resized[masks_resized > 0.5] = 1
-        masks_resized[masks_resized <= 0.5] = 0
+        # # Post-process and resize GT for fair comparison
+        # masks_resized = torch.sigmoid(mask)
+        # masks_resized[masks_resized > 0.5] = 1
+        # masks_resized[masks_resized <= 0.5] = 0
 
-        gts_resized = F.interpolate(gts.unsqueeze(0), size=masks_resized.shape[2:], mode='nearest').squeeze(0)
+        gts_resized = F.interpolate(gts.unsqueeze(0), size=mask.shape[2:], mode='nearest').squeeze(0)
         # imgs_resized = F.interpolate(orig_imgs.unsqueeze(0), size=masks_resized.shape[2:], mode='nearest').squeeze(0)
 
         save_dir = '/content/drive/MyDrive/segmentation_debug'
@@ -347,15 +352,15 @@ def inference_ds(ds, model, sam, transform, epoch, args, mask_refinement):
         np.savez_compressed(
             os.path.join(save_dir, f'debug_volume{img_idx}.npz'),
             image=orig_imgs.squeeze().permute(2, 0, 1).detach().cpu().numpy(),
-            mask=masks_resized.squeeze().detach().cpu().numpy(),
+            mask=mask.squeeze().detach().cpu().numpy(),
             gt=gts_resized.squeeze().detach().cpu().numpy()  # 👈 add this line
         )
 
         print("✅ Saved debug volume to Drive")
 
-        print(f"inside inference!!! masks shape:{masks_resized.shape} gts:{gts.shape}, image:{orig_imgs.shape}")
+        print(f"inside inference!!! masks shape:{mask.shape} gts:{gts.shape}, image:{orig_imgs.shape}")
         dice, ji = get_dice_ji(
-            masks_resized.squeeze().detach().cpu().numpy(),
+            mask.squeeze().detach().cpu().numpy(),
             gts_resized.squeeze().detach().cpu().numpy()
         )
 
@@ -389,101 +394,8 @@ def sam_call(batched_input, sam, dense_embeddings, mask_refinement):
     
     return refined_mask
 
-# def sam_call3D(batched_input, sam, dense_embeddings):
-#     with torch.no_grad():
-#         low_res_masks_3D = []
-
-#         for batch_idx, x in enumerate(batched_input):
-#             image = x["image"]  # Shape: [C, D, H, W]
-#             C, D, H, W = image.shape
-#             mask_slices = []
-
-#             for d in range(D):
-#                 torch.compiler.cudagraph_mark_step_begin()
-#                 slice_img = image[:, d, :, :].unsqueeze(0).float()
-#                 if slice_img.shape[1] == 1:
-#                     slice_img = slice_img.repeat(1, 3, 1, 1)
-
-#                 embeddings_output = sam.image_encoder(slice_img)
-#                 image_embeddings = embeddings_output["vision_features"].clone()
-
-#                 sparse_embeddings_none, _ = sam.sam_prompt_encoder(points=None, boxes=None, masks=None)
-
-#                 dense_emb_slice = dense_embeddings[batch_idx, :, d, :, :].unsqueeze(0).clone()
-#                 H_pe, W_pe = image_embeddings.shape[-2], image_embeddings.shape[-1]
-
-#                 try:
-#                     dense_emb_slice_resized = F.interpolate(
-#                         dense_emb_slice,
-#                         size=(H_pe, W_pe),
-#                         mode='bilinear',
-#                         align_corners=False
-#                     )
-#                 except Exception as e:
-#                     print(f"Interpolation failed at batch {batch_idx}, slice {d}")
-#                     traceback.print_exc()
-#                     exit()
-
-#                 image_pe_resized = F.interpolate(
-#                     sam.sam_prompt_encoder.get_dense_pe(),
-#                     size=(H_pe, W_pe),
-#                     mode='bilinear',
-#                     align_corners=False
-#                 )
-
-#                 print(f"Calling decoder at batch {batch_idx} slice {d}")
-#                 print(f"image_embeddings: {image_embeddings.shape}")
-#                 print(f"dense_prompt_embeddings: {dense_emb_slice_resized.shape}")
-#                 print(f"sparse_prompt_embeddings: {sparse_embeddings_none.shape}")
-#                 print(f"image_pe: {image_pe_resized.shape}")
-                
-#                 try:
-#                     torch.compiler.cudagraph_mark_step_begin()
-#                     low_res_mask, _ = sam.sam_mask_decoder(
-#                         image_embeddings=image_embeddings,
-#                         image_pe=image_pe_resized,
-#                         sparse_prompt_embeddings=sparse_embeddings_none,
-#                         dense_prompt_embeddings=dense_emb_slice_resized,
-#                         multimask_output=False,
-#                         repeat_image=False,
-#                     )
-#                 except Exception as e:
-#                     print(f"Decoder failed at batch {batch_idx}, slice {d}")
-#                     traceback.print_exc()
-#                     exit()
-
-#                 mask_slices.append(low_res_mask.squeeze(1))
-
-#             full_mask = torch.stack(mask_slices, dim=2)
-#             full_mask = full_mask.unsqueeze(0)
-#             low_res_masks_3D.append(full_mask)
-
-#         result = torch.cat(low_res_masks_3D, dim=0)
-#         return result
-
-# def sam_call3D(batched_input, sam, dense_embeddings):
-#     image_embeddings = sam.image_encoder(batched_input)
-#     image_pe = sam.prompt_encoder.positional_encoding(image_embeddings)
-#     input_size = batched_input.shape
-
-#     sparse_embeddings, dense_embeddings = sam.prompt_encoder(
-#         points=None,
-#         boxes=None,
-#         masks=dense_embeddings,
-#     )
-#     low_res_masks, iou_predictions = sam.mask_decoder(
-#         image_embeddings=image_embeddings,
-#         image_pe=image_pe,
-#         sparse_prompt_embeddings=sparse_embeddings,
-#         dense_prompt_embeddings=dense_embeddings,
-#         multimask_output=False,
-#     )
-#     masks = sam.postprocess_masks(low_res_masks, input_size, original_size)
-#     return masks
-
 
 def main(args=None, sam_args=None):
-
 
     os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
     
@@ -493,38 +405,10 @@ def main(args=None, sam_args=None):
     # Initialize the model
     model = ModelEmb3D(args=args).float().to(device)
     mask_refinement = MaskRefinement2D(in_channels=1, out_channels=1).float().to(device)
-    # model = model.half()  # Use half precision for lower memory usage
 
-    # # 🔹 Ensure the config file exists
-    # if not os.path.exists(sam_args['config_file']):
-    #     raise FileNotFoundError(f"Config file not found: {sam_args['config_file']}")
-
-    # # 🔹 Ensure the checkpoint file exists
-    # if not os.path.exists(sam_args['sam_checkpoint']):
-    #     raise FileNotFoundError(f"Checkpoint file not found: {sam_args['sam_checkpoint']}")
-
-    # config_dir = os.path.dirname(sam_args['config_file'])  
-
-    # if not os.path.exists(config_dir):
-    #     raise FileNotFoundError(f"Config directory not found: {config_dir}")
     
     sam = sam_model_registry[sam_args['model_type']](checkpoint=sam_args['sam_checkpoint'])
     sam.to(device=device)
-
-    # if GlobalHydra.instance().is_initialized():
-    #     GlobalHydra.instance().clear()
-
-    # initialize_config_dir(config_dir)
-    # cfg = compose(config_name=os.path.basename(sam_args['config_file']).replace(".yaml", ""))
-    # print("Loaded Config:", OmegaConf.to_yaml(cfg))
-
-    # sam = build_sam2_video_predictor(
-    #     config_file=os.path.basename(sam_args['config_file']).replace(".yaml", ""),
-    #     ckpt_path=None,
-    #     device=device,
-    #     mode="eval",
-    #     vos_optimized=True
-    # )
 
     checkpoint = torch.load(sam_args['sam_checkpoint'], weights_only=True, map_location="cpu")
     valid_keys = set(sam.state_dict().keys())
@@ -540,9 +424,24 @@ def main(args=None, sam_args=None):
         weight_decay=float(args['WD'])
     )
 
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=3, verbose=True
-    )
+    if False:
+            # ✅ Set up save directory in Google Drive
+        base_save_dir = "/content/drive/My Drive/AutoSAM_results"
+        os.makedirs(base_save_dir, exist_ok=True)
+
+        results_dir = os.path.join(base_save_dir, f'gpu1')
+        os.makedirs(results_dir, exist_ok=True)
+
+        # ✅ Define best model paths
+        args['path_best'] = os.path.join(results_dir, 'net_best.pth')
+        path_best = os.path.join(results_dir, 'best.csv')
+        args['vis_folder'] = os.path.join(results_dir, 'vis')
+        os.makedirs(args['vis_folder'], exist_ok=True)
+        model.load_state_dict(torch.load(args['path_best']), strict = False, weights_only = False)
+        model.eval()  # Set model to evaluation mode
+        IoU_val = inference_ds(ds_val, model.eval(), sam, transform, epoch, args, mask_refinement)
+        exit()
+        
 
     print('Loading images')
     trainset, testset = get_lung_dataset(args, sam_trans=transform)
@@ -595,16 +494,11 @@ def main(args=None, sam_args=None):
         with torch.no_grad():
             IoU_val = inference_ds(ds_val, model.eval(), sam, transform, epoch, args, mask_refinement)
             if IoU_val > best:
-                torch.save(model, args['path_best'])
+                torch.save(model.state_dict(), args['path_best'])
                 best = IoU_val
                 print(f"Best results: {best}")
                 f_best.write(f"{epoch},{best}\n")
                 f_best.flush()
-    try:
-        avg_epoch_loss = np.mean(loss_list)
-        scheduler.step(avg_epoch_loss)
-    except:
-        print("!!!!!!!!!!!!!! couldnot do scheduler!!!!!!!!!!!!")
 
     f_best.close()
 
@@ -613,7 +507,7 @@ def main(args=None, sam_args=None):
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description='Description of your program')
-    parser.add_argument('-lr', '--learning_rate', default=0.0003, help='learning_rate', required=False)
+    parser.add_argument('-lr', '--learning_rate', default=0.01, help='learning_rate', required=False)
     parser.add_argument('-bs', '--Batch_size', default=3, help='batch_size', required=False)
     parser.add_argument('-epoches', '--epoches', default=5, help='number of epoches', required=False)
     parser.add_argument('-nW', '--nW', default=0, help='evaluation iteration', required=False)
