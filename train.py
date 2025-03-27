@@ -540,7 +540,8 @@ def main(args=None, sam_args=None):
         drop_last=False)
 
     # ✅ Set up save directory in Google Drive
-    base_save_dir = "/media/cilab/DATA/Hila/Data/Projects/AutoSAM/results"
+    # base_save_dir = "/media/cilab/DATA/Hila/Data/Projects/AutoSAM/results"
+    base_save_dir = "/content/drive/My Drive/Projects/AutoSAM/results"
     os.makedirs(base_save_dir, exist_ok=True)
 
     results_dir = os.path.join(base_save_dir, f'gpu{args["folder"]}')
@@ -614,7 +615,8 @@ if __name__ == '__main__':
     # }
 
     sam_args = {
-        'sam_checkpoint': "/media/cilab/DATA/Hila/Data/Projects/AutoSAM/sam_vit_h.pth",
+        'sam_checkpoint': "/content/drive/My Drive/sam_vit_h.pth",
+        # 'sam_checkpoint': "/media/cilab/DATA/Hila/Data/Projects/AutoSAM/sam_vit_h.pth",
         'model_type': "vit_h",
         'generator_args': {
             'points_per_side': 8,

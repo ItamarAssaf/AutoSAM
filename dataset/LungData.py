@@ -101,9 +101,11 @@ class ImageLoader(torch.utils.data.Dataset):
 
     def preload_all_volumes_as_is(self, downscale_factor=(0.5, 0.5, 1.0), train=False):
         if train:
-            cache_dir = '/media/cilab/DATA/Hila/Data/Projects/AutoSAM'
+            # cache_dir = '/media/cilab/DATA/Hila/Data/Projects/AutoSAM'
+            cache_dir = '/content/drive/My Drive/Projects/AutoSAM'
         else:
-            cache_dir = '/media/cilab/DATA/Hila/Data/Projects/AutoSAM'
+            # cache_dir = '/media/cilab/DATA/Hila/Data/Projects/AutoSAM'
+            cache_dir = '/content/drive/My Drive/Projects/AutoSAM'
 
         os.makedirs(cache_dir, exist_ok=True)
         all_volumes = []
@@ -252,7 +254,8 @@ class ImageLoader(torch.utils.data.Dataset):
 
 
 def get_lung_dataset(args, sam_trans):
-    datadir = '/media/cilab/DATA/Hila/Data/Projects/AutoSAM/Abdomen'
+    # datadir = '/media/cilab/DATA/Hila/Data/Projects/AutoSAM/Abdomen'
+    datadir = '/content/drive/My Drive/Abdomen'
     transform_train, transform_test = get_lung_transform(args)
     ds_train = ImageLoader(datadir, train=True, transform=transform_train, sam_trans=sam_trans, loops=5)
     ds_test = ImageLoader(datadir, train=False, transform=transform_test, sam_trans=sam_trans)
