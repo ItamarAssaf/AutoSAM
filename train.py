@@ -198,8 +198,8 @@ def train_single_epoch3D(ds, model, sam, optimizer, transform, epoch, scaler):
                 return np.mean(loss_list) if loss_list else 0
 
             try:
-                img_tensor, gts, original_sz, _ = sample
-
+                img_tensor, gts, original_sz,_= sample
+                '''
                 fig, axes = plt.subplots(1, 2, figsize=(12, 6))
                 # Display the image slice
                 axes[0].imshow(img_tensor[:, :, 50], cmap="gray")
@@ -210,6 +210,7 @@ def train_single_epoch3D(ds, model, sam, optimizer, transform, epoch, scaler):
                 axes[1].set_title("Segmentation Mask Slice")
                 axes[1].axis("off")  # Hide axes
                 plt.show()
+                '''
 
                 orig_img = img_tensor.to(sam.device)
                 gts = gts.to(sam.device)
@@ -238,7 +239,7 @@ def train_single_epoch3D(ds, model, sam, optimizer, transform, epoch, scaler):
                 # Dense embedding
                 dense_embeddings = model(orig_imgs_small)
 
-                for slice_idx in range(92):
+                for slice_idx in range(NumSliceDim):
                     with torch.cuda.amp.autocast():
                         current_slice = orig_imgs_small[:,:,slice_idx,:,:]
                         current_dense_embeddings = dense_embeddings[:,:,slice_idx,:,:]
@@ -248,6 +249,21 @@ def train_single_epoch3D(ds, model, sam, optimizer, transform, epoch, scaler):
                         mask = temp_mask
                     else:
                         mask = torch.cat((mask, temp_mask), 2)
+
+                fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+                # Display the image slice
+                selected_gts_np = selected_gts.squeeze().detach().cpu().numpy()
+                mask_np = mask.squeeze().squeeze().detach().cpu().numpy()
+                mask_np[mask_np >= 0.5] = 1
+                mask_np[mask_np < 0.5] = 0
+                axes[0].imshow(selected_gts_np[20 ,:, :], cmap="gray")
+                axes[0].set_title("Ground Truth mask")
+                axes[0].axis("off")  # Hide axes
+
+                axes[1].imshow(mask_np[20, :, :], cmap="gray")
+                axes[1].set_title("Predicted mask")
+                axes[1].axis("off")  # Hide axes
+                plt.show()
 
                 loss = gen_step(optimizer, selected_gts, mask, criterion, accumulation_steps=4, step=ix, scaler=scaler)
                 loss_list.append(loss)
@@ -573,8 +589,8 @@ if __name__ == '__main__':
 
     parser.add_argument('-depth_wise', '--depth_wise', default=False, help='image size', required=False)
     parser.add_argument('-order', '--order', default=85, help='image size', required=False)
-    parser.add_argument('-Idim', '--Idim', default=512, help='image size', required=False)
-    parser.add_argument('-NumSliceDim', '--NumSliceDim', default=92, help='image size', required=False)
+    parser.add_argument('-Idim', '--Idim', default=64, help='image size', required=False)
+    parser.add_argument('-NumSliceDim', '--NumSliceDim', default=32, help='image size', required=False)
     parser.add_argument('-rotate', '--rotate', default=22, help='image size', required=False)
     parser.add_argument('-scale1', '--scale1', default=0.75, help='image size', required=False)
     parser.add_argument('-scale2', '--scale2', default=1.25, help='image size', required=False)
