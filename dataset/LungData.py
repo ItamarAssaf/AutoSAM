@@ -101,11 +101,11 @@ class ImageLoader(torch.utils.data.Dataset):
 
     def preload_all_volumes_as_is(self, downscale_factor=(0.5, 0.5, 1.0), train=False):
         if train:
-            # cache_dir = '/media/cilab/DATA/Hila/Data/Projects/AutoSAM'
-            cache_dir = '/content/drive/My Drive/Projects/AutoSAM'
+            cache_dir = '/media/cilab/DATA/Hila/Data/Projects/AutoSAM'
+            #cache_dir = '/content/drive/My Drive/Projects/AutoSAM'
         else:
-            # cache_dir = '/media/cilab/DATA/Hila/Data/Projects/AutoSAM'
-            cache_dir = '/content/drive/My Drive/Projects/AutoSAM'
+            cache_dir = '/media/cilab/DATA/Hila/Data/Projects/AutoSAM'
+            #cache_dir = '/content/drive/My Drive/Projects/AutoSAM'
 
         os.makedirs(cache_dir, exist_ok=True)
         all_volumes = []
@@ -130,34 +130,71 @@ class ImageLoader(torch.utils.data.Dataset):
             # Downscale
             #img = zoom(img, downscale_factor, order=1)
             #mask = zoom(mask, downscale_factor, order=1)
-            img = zoom(img, (256 / img.shape[0], 256 / img.shape[1], 92 / img.shape[2]))
-            mask = zoom(mask, (256 / mask.shape[0], 256 / mask.shape[1], 92 / mask.shape[2]))
+            img = zoom(img, (256 / img.shape[0], 256 / img.shape[1], 64 / img.shape[2]))
+            mask = zoom(mask, (256 / mask.shape[0], 256 / mask.shape[1], 64 / mask.shape[2]))
 
-            mask[mask >= 0.5] = 1
+            #mask = (mask - np.min(mask)) / (np.max(mask) - np.min(mask))
+            print(np.min(mask))
+            print(np.max(mask))
+
+            plt.imshow(mask[:,:,30])
+            plt.show()
+
+            mask[mask > 0.5] = 1
             mask[mask <= 0.5] = 0
 
             fig, axes = plt.subplots(1, 2, figsize=(12, 6))
             # Display the image slice
-            axes[0].imshow(img[:,:,50], cmap="gray")
+            axes[0].imshow(img[:,:,30], cmap="gray")
             axes[0].set_title("CT Scan Slice")
             axes[0].axis("off")  # Hide axes
 
-            axes[1].imshow(mask[:,:,50], cmap="gray")
+            axes[1].imshow(mask[:,:,30], cmap="gray")
             axes[1].set_title("Segmentation Mask Slice")
             axes[1].axis("off")  # Hide axes
             plt.show()
 
+            '''
 
+            transformed_img = []
+            transformed_mask = []
+
+            for slice_idx in range(img.shape[2]):
+                img_slice = img[:, :, slice_idx]
+                mask_slice = mask[:, :, slice_idx]
+                img_slice = np.stack([img_slice * 1 / 3] * 3, axis=-1)
+                img_slice, mask_slice = self.transform(img_slice, mask_slice)
+                img_slice, mask_slice = self.sam_trans.apply_image_torch(img_slice), self.sam_trans.apply_image_torch(mask_slice)
+                img_slice,mask_slice = self.sam_trans.preprocess(img_slice), self.sam_trans.preprocess(mask_slice)
+
+                transformed_img.append(img_slice)
+                transformed_mask.append(img_slice)
+
+            original_size = tuple(img.shape[0:2])
+            image_size = tuple(transformed_img[0].shape[1:3])
+
+            transformed_img = np.stack(transformed_img, axis=0)
+            transformed_mask = np.stack(transformed_mask, axis=0)
+            transformed_img = torch.from_numpy(transformed_img)
+            transformed_mask = torch.from_numpy(transformed_mask)
+            transformed_img = transformed_img.permute(1, 0, 2, 3)
+            transformed_mask = transformed_mask.permute(1, 0, 2, 3)
+
+            img_tensor = torch.tensor(transformed_img, dtype=torch.float32)
+            mask_tensor = torch.tensor(transformed_mask, dtype=torch.float32)
+            #original_size = torch.tensor(img_tensor.shape)
+            #img_size = torch.tensor(img_tensor.shape)
+            '''
             img_tensor = torch.tensor(img, dtype=torch.float32)
             mask_tensor = torch.tensor(mask, dtype=torch.float32)
-            original_size = torch.tensor(img_tensor.shape)
-            img_size = torch.tensor(img_tensor.shape)
+            original_size = img.shape[0:2]
+            image_size = img.shape[0:2]
 
             # Save .pt file
-            torch.save((img_tensor, mask_tensor, original_size, img_size), volume_pt_path)
+            torch.save((img_tensor, mask_tensor, original_size, image_size), volume_pt_path)
             print(f"💾 Saved volume tensor at: {volume_pt_path}")
 
-            all_volumes.append((img_tensor, mask_tensor, original_size, img_size))
+            all_volumes.append((img_tensor, mask_tensor, original_size, image_size))
 
         print(f"✅ Done! Total volumes processed or loaded from cache: {len(all_volumes)}")
         return all_volumes
@@ -205,7 +242,7 @@ class ImageLoader(torch.utils.data.Dataset):
                 axes[1].axis("off")  # Hide axes
                 plt.show()
 
-                image_size = tuple(img_slice.shape[1:3])  # (256, 256)
+                image_size = tuple(img_slice.shape[1:3])
 
                 # Store the processed slice and metadata as a tuple
                 all_slices.append((self.sam_trans.preprocess(img_slice),
@@ -223,8 +260,6 @@ class ImageLoader(torch.utils.data.Dataset):
 
 
 #        return self.all_slices[index % len(self.all_slices)]
-
-
 
         '''
         index = index % len(self.paths)
@@ -254,8 +289,8 @@ class ImageLoader(torch.utils.data.Dataset):
 
 
 def get_lung_dataset(args, sam_trans):
-    # datadir = '/media/cilab/DATA/Hila/Data/Projects/AutoSAM/Abdomen'
-    datadir = '/content/drive/My Drive/Abdomen'
+    datadir = '/media/cilab/DATA/Hila/Data/Projects/AutoSAM/Abdomen'
+    #datadir = '/content/drive/My Drive/Abdomen'
     transform_train, transform_test = get_lung_transform(args)
     ds_train = ImageLoader(datadir, train=True, transform=transform_train, sam_trans=sam_trans, loops=5)
     ds_test = ImageLoader(datadir, train=False, transform=transform_test, sam_trans=sam_trans)
@@ -295,7 +330,7 @@ if __name__ == "__main__":
     sam = sam_model_registry[sam_args['model_type']](checkpoint=sam_args['sam_checkpoint'])
     sam.to(device=torch.device('cuda', sam_args['gpu_id']))
     sam_trans = ResizeLongestSide(sam.image_encoder.img_size)
-    ds_train, ds_test = get_monu_dataset(args, sam_trans)
+    ds_train, ds_test = get_lung_dataset(args, sam_trans)
     ds = torch.utils.data.DataLoader(ds_train,
                                      batch_size=1,
                                      num_workers=0,

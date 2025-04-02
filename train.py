@@ -8,6 +8,7 @@ from tqdm import tqdm
 import traceback
 import random
 from torch.cuda.amp import autocast, GradScaler
+from dataset.tfs import get_lung_transform
 
 
 
@@ -96,26 +97,15 @@ def open_folder(path):
     return str(len(a))
 
 
-def gen_step(optimizer, gts, masks, criterion, accumulation_steps, step, scaler):
+def gen_step(optimizer, gts, masks, criterion, accumulation_steps, step):
     size = masks.shape[2:]
-    gts_sized = F.interpolate(gts.unsqueeze(dim=1), size, mode='nearest').float()
-    gts_sized = gts_sized.clamp(0, 1)
-
-    with torch.cuda.amp.autocast():
-        loss_1 = criterion(masks, gts_sized)
-        loss_2 = Dice_loss(masks.sigmoid(), gts_sized)
-        loss = loss_1 + loss_2
-
-    scaler.scale(loss).backward()
-
-    if (step + 1) % accumulation_steps == 0:
-        try:
-            scaler.step(optimizer)
-            scaler.update()
-            optimizer.zero_grad()
-        except Exception as e:
-            print(f"⚠ GradScaler step failed: {e}. Skipping optimizer step.")
-            optimizer.zero_grad()
+    gts_sized = F.interpolate(gts.unsqueeze(dim=1), size, mode='nearest')
+    #gts_sized = F.interpolate(gts, size, mode='nearest')
+    loss = criterion(masks, gts_sized) + Dice_loss(masks, gts_sized)
+    loss.backward()
+    if (step + 1) % accumulation_steps == 0:  # Wait for several backward steps
+        optimizer.step()
+        optimizer.zero_grad()
     return loss.item()
 
 
@@ -131,6 +121,8 @@ def get_input_dict(imgs, original_sz, img_sz):
             # print(i)
         input_size = tuple([int(x) for x in img_sz[i].squeeze().tolist()])
         original_size = tuple([int(x) for x in original_sz[i].squeeze().tolist()])
+        #input_size = tuple([int(x) for x in img_sz[i].tolist()])
+        #original_size = tuple([int(x) for x in original_sz[i].tolist()])
         singel_input = {
             'image': img,
             'original_size': original_size,
@@ -179,7 +171,7 @@ def train_single_epoch(ds, model, sam, optimizer, transform, epoch):
     return np.mean(loss_list)
 
 
-def train_single_epoch3D(ds, model, sam, optimizer, transform, epoch, scaler):
+def train_single_epoch3D(ds, model, sam, optimizer, transform, epoch, scaler,sam_trans):
     loss_list = []
     pbar = tqdm(ds)
     criterion = nn.BCEWithLogitsLoss()
@@ -189,84 +181,217 @@ def train_single_epoch3D(ds, model, sam, optimizer, transform, epoch, scaler):
 
     consecutive_failures = 0
     max_failures = 10
+    transform_train, transform_test = get_lung_transform(args)
 
     for ix, batch in enumerate(pbar):
-        # batch is a list of tuples: (img_tensor, mask_tensor, original_size, img_size, video_path)
         for sample in batch:
             if consecutive_failures >= max_failures:
                 print(f"❌ Stopping training after {max_failures} consecutive failures.")
                 return np.mean(loss_list) if loss_list else 0
 
             try:
-                img_tensor, gts, original_sz,_= sample
+                img_tensor, gts, original_sz,img_sz= sample
+
+                img_tensor_np = img_tensor.cpu().numpy()
+                gts_np = gts.cpu().numpy()
+
                 '''
                 fig, axes = plt.subplots(1, 2, figsize=(12, 6))
                 # Display the image slice
-                axes[0].imshow(img_tensor[:, :, 50], cmap="gray")
+                axes[0].imshow(img_tensor_np[:,:,30], cmap="gray")
                 axes[0].set_title("CT Scan Slice")
                 axes[0].axis("off")  # Hide axes
 
-                axes[1].imshow(gts[:, :, 50], cmap="gray")
+                axes[1].imshow(gts_np[:,:,30], cmap="gray")
                 axes[1].set_title("Segmentation Mask Slice")
                 axes[1].axis("off")  # Hide axes
                 plt.show()
                 '''
 
+
                 orig_img = img_tensor.to(sam.device)
                 gts = gts.to(sam.device)
 
-                # Random slice selection:
-                volume_depth = orig_img.shape[-1]
-                if volume_depth <= NumSliceDim - 1:
-                    print(f"⚠ Volume depth {volume_depth} < NumSliceDim {NumSliceDim}, skipping...")
-                    continue
+                orig_img_np = orig_img.cpu().numpy()
+                orig_img_np = orig_img_np[:, :,20]
+                plt.imshow(orig_img_np, cmap="gray")
+                plt.show()
 
-                start_frame = np.random.randint(0, volume_depth - NumSliceDim + 1)
+                # Random slice selection:
+                #volume_depth = orig_img.shape[-1]
+                #if volume_depth <= NumSliceDim - 1:
+                #    print(f"⚠ Volume depth {volume_depth} < NumSliceDim {NumSliceDim}, skipping...")
+                #    continue
+
+                start_frame = 0
                 selected_slices = orig_img[:, :, start_frame:start_frame+NumSliceDim]
                 selected_gts = gts[:, :, start_frame:start_frame+NumSliceDim]
                 selected_slices = selected_slices.permute(2, 0, 1)
                 selected_gts = selected_gts.permute(2, 0, 1).unsqueeze(0)
 
+                selected_slices_np = selected_slices.cpu().numpy()
+                selected_slices_np = selected_slices_np[20, :, :]
+                plt.imshow(selected_slices_np, cmap="gray")
+                plt.show()
+
                 # Resize and adjust
                 orig_imgs_small = F.interpolate(
-                    selected_slices.unsqueeze(0).unsqueeze(1),  # add batch dim
-                    size=(NumSliceDim, Idim, Idim),
+                    orig_img.unsqueeze(0).unsqueeze(1),  # add batch dim
+                    size=(Idim, Idim,NumSliceDim),
                     mode='trilinear', align_corners=True
                 )
-                if orig_imgs_small.shape[1] == 1:
-                    orig_imgs_small = orig_imgs_small.repeat(1, 3, 1, 1, 1)
+
+                orig_imgs_small = orig_imgs_small
+                orig_imgs_small = orig_imgs_small.permute(0, 1, 4, 2, 3)
+                orig_imgs_small_scan = orig_imgs_small
+
+                orig_imgs_small_np = orig_imgs_small.squeeze().squeeze().cpu().numpy()
+                orig_imgs_small_np = orig_imgs_small_np[20, :,:]
+                plt.imshow(orig_imgs_small_np, cmap="gray")
+                plt.show()
+
+                #orig_imgs_small = orig_imgs_small.squeeze(0).squeeze(0) *1/3
+                #orig_imgs_small = orig_imgs_small.unsqueeze(-1).repeat(1, 1, 1, 3)
+                #orig_imgs_small = orig_imgs_small.unsqueeze(0).unsqueeze(0)
+
+
+                orig_imgs_small = orig_imgs_small * 1/3
+                orig_imgs_small = orig_imgs_small.repeat(1, 3, 1, 1, 1)
+
+                orig_imgs_small_np = orig_imgs_small.squeeze().cpu().numpy()
+                orig_imgs_small_np_slice = orig_imgs_small_np[:,20,:,:]
+                orig_imgs_small_np_slice = (orig_imgs_small_np_slice - np.min(orig_imgs_small_np_slice)) / (np.max(orig_imgs_small_np_slice) -  np.min(orig_imgs_small_np_slice))
+                orig_imgs_small_np_slice = np.transpose(orig_imgs_small_np_slice, (1, 2, 0))
+
+                '''
+                plt.imshow(orig_imgs_small_np_slice,cmap="gray")
+                plt.axis('off')
+                plt.show()
+                '''
 
                 # Dense embedding
+                #orig_imgs_small = orig_imgs_small.unsqueeze(0).unsqueeze(1)
+                #dense_embeddings = model(orig_imgs_small)
+
+                #orig_imgs_small_scan = orig_imgs_small_scan.squeeze(0)
                 dense_embeddings = model(orig_imgs_small)
+                mask = torch.zeros(NumSliceDim, 256, 256)
 
                 for slice_idx in range(NumSliceDim):
                     with torch.cuda.amp.autocast():
-                        current_slice = orig_imgs_small[:,:,slice_idx,:,:]
+                        '''
+                        img_slice = img[:, :, slice_idx]
+                        mask_slice = mask[:, :, slice_idx]
+                        img_slice = np.stack([img_slice * 1 / 3] * 3, axis=-1)
+                        img_slice, mask_slice = self.transform(img_slice, mask_slice)
+                        img_slice, mask_slice = self.sam_trans.apply_image_torch(
+                            img_slice), self.sam_trans.apply_image_torch(mask_slice)
+                        img_slice, mask_slice = self.sam_trans.preprocess(img_slice), self.sam_trans.preprocess(
+                            mask_slice)
+                        '''
+
+                        current_slice = orig_imgs_small[:,:,slice_idx,:,:].squeeze()
+                        current_slice = current_slice.permute(1,2,0)
+                        mask_slice = selected_gts[:,slice_idx,:,:].squeeze()
+                        #mask_slice = torch.from_numpy(mask_slice).float().cuda().squeeze(0)
+
+                        current_slice_np = current_slice.cpu().numpy()
+                        #current_slice_np = np.transpose(current_slice_np, (1, 2, 0))
+
+                        '''
+                        plt.imshow(orig_imgs_small_np_slice, cmap="gray")
+                        plt.axis('off')
+                        plt.show()
+                        '''
+
+                        mask_slice_np = mask_slice.cpu().numpy()
+
+                        '''
+                        plt.imshow(mask_slice_np, cmap="gray")
+                        plt.axis('off')
+                        plt.show()
+                        '''
+
+                        current_slice, mask_slice = transform_train(current_slice.cpu(), mask_slice.cpu())
+                        original_sz = current_slice.shape[1:3]
+
+                        current_slice = sam_trans.apply_image_torch(current_slice)
+                        #print(current_slice.device)
+                        current_slice = sam_trans.preprocess(current_slice).cuda()
+                        img_sz = current_slice.shape[1:3]
+                        img_sz = torch.tensor(img_sz).unsqueeze(0)
+                        original_sz = torch.tensor(original_sz).unsqueeze(0)
+
+
                         current_dense_embeddings = dense_embeddings[:,:,slice_idx,:,:]
-                        batched_input = get_input_dict([current_slice], [original_sz], [original_sz])
-                        temp_mask = sam_call(batched_input, sam, current_dense_embeddings).unsqueeze(2)
-                    if slice_idx == 0:
-                        mask = temp_mask
-                    else:
-                        mask = torch.cat((mask, temp_mask), 2)
+                        '''
+                        dense_embeddings_np = current_dense_embeddings.squeeze().detach().cpu().numpy()
+                        plt.imshow(dense_embeddings_np[50,:,:],cmap="gray")
+                        plt.title('Dense embedding')
+                        plt.show()
+                        '''
+                        #batched_input = get_input_dict(current_slice, original_sz, img_sz)
+                        batched_input = get_input_dict([current_slice], [original_sz], [img_sz])
+                        temp_mask = norm_batch(sam_call(batched_input, sam, current_dense_embeddings))
+                        temp_mask = temp_mask.squeeze().squeeze()
+                        tensor_min, tensor_max = temp_mask.min(), temp_mask.max()
+                        #temp_mask = (temp_mask.float() - tensor_min) / (tensor_max - tensor_min)
+                        mask[slice_idx,  :, :] = temp_mask
+
+                        temp_mask_np =temp_mask.detach().cpu().numpy()
+                        #temp_mask_np = (temp_mask_np - temp_mask_np.min())/(temp_mask_np.max() - temp_mask_np.min())
+                        temp_mask_np [temp_mask_np >= 0.5] =1
+                        temp_mask_np [temp_mask_np < 0.5] =0
+                        '''
+                        plt.imshow(temp_mask_np, cmap="gray")
+                        plt.show()
+                        '''
+
+
+                mask = mask.unsqueeze(0).unsqueeze(1).cuda()
+
+                    #if slice_idx == 0:
+                    #    mask = temp_mask
+                    #else:
+                    #    mask = torch.cat((mask, temp_mask), 2)
 
                 fig, axes = plt.subplots(1, 2, figsize=(12, 6))
                 # Display the image slice
                 selected_gts_np = selected_gts.squeeze().detach().cpu().numpy()
+                #mask = (mask - mask.min() ) / (mask.max() - mask.min())
+                #mask = mask.squeeze().squeeze()
+                #mask = (mask - mask.min(dim=2, keepdim=True)[0]) / (mask.max(dim=2, keepdim=True)[0] - mask.min(dim=2, keepdim=True)[0])
+                #mask[mask >= 0.5] = 1
+                #mask[mask < 0.5] = 0
+
                 mask_np = mask.squeeze().squeeze().detach().cpu().numpy()
+                #mask_np = (mask_np - np.min(mask_np)) / (np.max(mask_np) - np.min(mask_np))
                 mask_np[mask_np >= 0.5] = 1
                 mask_np[mask_np < 0.5] = 0
-                axes[0].imshow(selected_gts_np[20 ,:, :], cmap="gray")
+                axes[0].imshow(selected_gts_np[35 ,:, :], cmap="gray")
                 axes[0].set_title("Ground Truth mask")
                 axes[0].axis("off")  # Hide axes
 
-                axes[1].imshow(mask_np[20, :, :], cmap="gray")
+                axes[1].imshow(mask_np[35, :, :], cmap="gray")
                 axes[1].set_title("Predicted mask")
                 axes[1].axis("off")  # Hide axes
                 plt.show()
 
-                loss = gen_step(optimizer, selected_gts, mask, criterion, accumulation_steps=4, step=ix, scaler=scaler)
+                loss = gen_step(optimizer, selected_gts, mask, criterion, accumulation_steps=4, step=ix)
                 loss_list.append(loss)
+
+                # 🔍 Gradient sanity check (every 10 layers only)
+                for idx, (name, param) in enumerate(model.named_parameters()):
+                    if not param.requires_grad:
+                        continue
+                    if idx % 10 == 0:
+                        if param.grad is not None:
+                            if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                                print(f"⚠ NaN or Inf detected in gradients of: {name}")
+                            elif param.grad.abs().sum() == 0:
+                                print(f"⚠ Zero gradients in: {name}")
+                        else:
+                            print(f"⚠ No gradients for: {name}")
 
                 # Reset failures after success
                 consecutive_failures = 0
@@ -281,13 +406,16 @@ def train_single_epoch3D(ds, model, sam, optimizer, transform, epoch, scaler):
     return np.mean(loss_list)
 
 
-def inference_ds(ds, model, sam, transform, epoch, args):
+def inference_ds(ds, model, sam, transform, epoch, args,sam_trans):
+
     pbar = tqdm(ds)
     model.eval()
     iou_list = []
     dice_list = []
     Idim = int(args['Idim'])
     NumSliceDim = int(args['NumSliceDim'])
+    transform_train, transform_test = get_lung_transform(args)
+
 
     for imgs, gts, original_sz, img_sz in pbar:
         orig_imgs = imgs.to(sam.device)
@@ -299,12 +427,26 @@ def inference_ds(ds, model, sam, transform, epoch, args):
 
         orig_imgs_small = F.interpolate(
             orig_imgs, 
-            (NumSliceDim, Idim, Idim), 
+            (Idim, Idim,NumSliceDim),
             mode='trilinear', 
             align_corners=True
         )
-        if orig_imgs_small.shape[1] == 1:
-            orig_imgs_small = orig_imgs_small.repeat(1, 3, 1, 1, 1)
+
+        orig_imgs_small = orig_imgs_small
+        orig_imgs_small = orig_imgs_small.permute(0, 1, 4, 2, 3)
+
+        orig_imgs_small_np = orig_imgs_small.squeeze().squeeze().cpu().numpy()
+        orig_imgs_small_np = orig_imgs_small_np[20, :, :]
+        plt.imshow(orig_imgs_small_np, cmap="gray")
+        plt.show()
+        #if orig_imgs_small.shape[1] == 1:
+        orig_imgs_small = orig_imgs_small *1/3
+        orig_imgs_small = orig_imgs_small.repeat(1, 3, 1, 1, 1)
+
+        gts = gts.permute(0, 3, 1, 2)
+        gts_np = gts.squeeze().detach().cpu().numpy()
+        plt.imshow(gts_np[35,:,:], cmap="gray")
+        plt.show()
 
         dense_embeddings = model(orig_imgs_small)
 
@@ -313,27 +455,93 @@ def inference_ds(ds, model, sam, transform, epoch, args):
             print(f"⚠ Volume depth {volume_depth} < NumSliceDim {NumSliceDim}, skipping...")
             continue
 
-        for slice_idx in range(NumSliceDim):
-            current_slice = orig_imgs_small[:, :, slice_idx, :, :]
-            current_dense_embeddings = dense_embeddings[:, :, slice_idx, :, :]
-            batched_input = get_input_dict([current_slice], [original_sz], [original_sz])
-            temp_mask = sam_call(batched_input, sam, current_dense_embeddings).unsqueeze(2)
+        mask = torch.zeros(NumSliceDim, 256, 256)
 
+        for slice_idx in range(NumSliceDim):
+            current_slice = orig_imgs_small[:, :, slice_idx, :, :].squeeze()
+            current_slice = current_slice.permute(1, 2, 0)
+            current_dense_embeddings = dense_embeddings[:, :, slice_idx, :, :]
+            gts = gts.squeeze()
+            mask_slice = gts[slice_idx, :, :]
+            mask_slice_np = mask_slice.detach().cpu().numpy()
+            #plt.imshow(mask_slice_np, cmap="gray")
+            #plt.show()
+
+
+            current_slice, mask_slice = transform_test(current_slice.cpu(), mask_slice.cpu())
+            original_sz = current_slice.shape[1:3]
+            current_slice = sam_trans.apply_image_torch(current_slice)
+            current_slice = sam_trans.preprocess(current_slice).cuda()
+            img_sz = current_slice.shape[1:3]
+            img_sz = torch.tensor(img_sz).unsqueeze(0)
+            original_sz = torch.tensor(original_sz).unsqueeze(0)
+
+            batched_input = get_input_dict([current_slice], [original_sz], [img_sz])
+            temp_mask = norm_batch(sam_call(batched_input, sam, current_dense_embeddings).unsqueeze(2))
+            temp_mask = temp_mask.squeeze().squeeze()
+            tensor_min, tensor_max = temp_mask.min(), temp_mask.max()
+            # temp_mask = (temp_mask.float() - tensor_min) / (tensor_max - tensor_min)
+            mask[slice_idx, :, :] = temp_mask
+
+            temp_mask_np = temp_mask.detach().cpu().numpy()
+            '''
+            fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+            axes[0].imshow(mask_slice_np, cmap="gray")
+            axes[0].set_title("Ground Truth mask")
+            axes[0].axis("off")  # Hide axes
+
+            axes[1].imshow(temp_mask_np, cmap="gray")
+            axes[1].set_title("Predicted mask")
+            axes[1].axis("off")  # Hide axes
+            plt.show()
+            '''
+
+            '''
             if slice_idx == 0:
                 mask = temp_mask
             else:
                 mask = torch.cat((mask, temp_mask), dim=2)
+            '''
+        mask = mask.unsqueeze(0).unsqueeze(1).cuda()
+
+        fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+        # Display the image slice
+        selected_gts_np = gts.detach().cpu().numpy()
+        # mask = (mask - mask.min() ) / (mask.max() - mask.min())
+        # mask = mask.squeeze().squeeze()
+        #mask = (mask - mask.min(dim=2, keepdim=True)[0]) / (mask.max(dim=2, keepdim=True)[0] - mask.min(dim=2, keepdim=True)[0])
+        mask[mask >= 0.5] = 1
+        mask[mask < 0.5] = 0
+
+        mask_np = mask.squeeze().squeeze().detach().cpu().numpy()
+        #mask_np = (mask_np - np.min(mask_np)) / (np.max(mask_np) - np.min(mask_np))
+        # mask_np[mask_np >= 0.5] = 1
+        # mask_np[mask_np < 0.5] = 0
+        axes[0].imshow(selected_gts_np[35, :, :], cmap="gray")
+        axes[0].set_title("Ground Truth mask")
+        axes[0].axis("off")  # Hide axes
+
+        axes[1].imshow(mask_np[35, :, :], cmap="gray")
+        axes[1].set_title("Predicted mask")
+        axes[1].axis("off")  # Hide axes
+        plt.show()
+
 
         # Post-process and resize GT for fair comparison
-        masks_resized = torch.sigmoid(mask)
-        masks_resized[masks_resized > 0.5] = 1
-        masks_resized[masks_resized <= 0.5] = 0
+        #masks_resized = torch.sigmoid(mask)
+        #masks_resized[masks_resized > 0.5] = 1
+        #masks_resized[masks_resized <= 0.5] = 0
 
-        gts_resized = F.interpolate(gts.unsqueeze(0), size=masks_resized.shape[2:], mode='nearest').squeeze(0)
+        #gts_resized = F.interpolate(gts.unsqueeze(0), size=masks_resized.shape[2:], mode='nearest').squeeze(0)
+
+        #dice, ji = get_dice_ji(
+        #    masks_resized.squeeze().detach().cpu().numpy(),
+        #    gts_resized.squeeze().detach().cpu().numpy()
+        #)
 
         dice, ji = get_dice_ji(
-            masks_resized.squeeze().detach().cpu().numpy(),
-            gts_resized.squeeze().detach().cpu().numpy()
+            mask.squeeze().squeeze().detach().cpu().numpy(),
+            gts.detach().cpu().numpy()
         )
 
         iou_list.append(ji)
@@ -346,10 +554,10 @@ def inference_ds(ds, model, sam, transform, epoch, args):
     return np.mean(iou_list)
 
 
-
-def sam_call(batched_input, sam, dense_embeddings): # Change to sam2
+def sam_call(batched_input, sam, dense_embeddings):
     with torch.no_grad():
-        input_images = sam.preprocess(batched_input[0]["image"])
+        input_images = torch.stack([sam.preprocess(x["image"]) for x in batched_input], dim=0)
+        #input_images = sam.preprocess(batched_input[0]["image"])
         image_embeddings = sam.image_encoder(input_images)
         sparse_embeddings_none, dense_embeddings_none = sam.prompt_encoder(points=None, boxes=None, masks=None)
     low_res_masks, iou_predictions = sam.mask_decoder(
@@ -482,6 +690,8 @@ def main(args=None, sam_args=None):
     
     sam = sam_model_registry[sam_args['model_type']](checkpoint=sam_args['sam_checkpoint'])
     sam.to(device=device)
+    sam_trans = ResizeLongestSide(sam.image_encoder.img_size)
+
 
     # if GlobalHydra.instance().is_initialized():
     #     GlobalHydra.instance().clear()
@@ -541,7 +751,7 @@ def main(args=None, sam_args=None):
 
     # ✅ Set up save directory in Google Drive
     # base_save_dir = "/media/cilab/DATA/Hila/Data/Projects/AutoSAM/results"
-    base_save_dir = "/content/drive/My Drive/Projects/AutoSAM/results"
+    base_save_dir = "/media/cilab/DATA/Hila/Data/Projects/AutoSAM/results"
     os.makedirs(base_save_dir, exist_ok=True)
 
     results_dir = os.path.join(base_save_dir, f'gpu{args["folder"]}')
@@ -559,10 +769,10 @@ def main(args=None, sam_args=None):
 
     for epoch in range(int(args['epoches'])):
         print(f"Starting epoch {epoch} out of {args['epoches']}")
-        train_single_epoch3D(ds, model.train(), sam.eval(), optimizer, transform, epoch, scaler)
+        train_single_epoch3D(ds, model.train(), sam.eval(), optimizer, transform, epoch, scaler,sam_trans)
 
         with torch.no_grad():
-            IoU_val = inference_ds(ds_val, model.eval(), sam, transform, epoch, args)
+            IoU_val = inference_ds(ds_val, model.eval(), sam, transform, epoch, args,sam_trans)
             if IoU_val > best:
                 torch.save(model, args['path_best'])
                 best = IoU_val
@@ -579,7 +789,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Description of your program')
     parser.add_argument('-lr', '--learning_rate', default=0.0003, help='learning_rate', required=False)
     parser.add_argument('-bs', '--Batch_size', default=3, help='batch_size', required=False)
-    parser.add_argument('-epoches', '--epoches', default=20, help='number of epoches', required=False)
+    parser.add_argument('-epoches', '--epoches', default=10, help='number of epoches', required=False)
     parser.add_argument('-nW', '--nW', default=0, help='evaluation iteration', required=False)
     parser.add_argument('-nW_eval', '--nW_eval', default=0, help='evaluation iteration', required=False)
     parser.add_argument('-WD', '--WD', default=1e-4, help='evaluation iteration', required=False)
@@ -590,8 +800,8 @@ if __name__ == '__main__':
 
     parser.add_argument('-depth_wise', '--depth_wise', default=False, help='image size', required=False)
     parser.add_argument('-order', '--order', default=85, help='image size', required=False)
-    parser.add_argument('-Idim', '--Idim', default=64, help='image size', required=False)
-    parser.add_argument('-NumSliceDim', '--NumSliceDim', default=32, help='image size', required=False)
+    parser.add_argument('-Idim', '--Idim', default=256, help='image size', required=False)
+    parser.add_argument('-NumSliceDim', '--NumSliceDim', default=64, help='image size', required=False)
     parser.add_argument('-rotate', '--rotate', default=22, help='image size', required=False)
     parser.add_argument('-scale1', '--scale1', default=0.75, help='image size', required=False)
     parser.add_argument('-scale2', '--scale2', default=1.25, help='image size', required=False)
@@ -615,8 +825,8 @@ if __name__ == '__main__':
     # }
 
     sam_args = {
-        'sam_checkpoint': "/content/drive/My Drive/sam_vit_h.pth",
-        # 'sam_checkpoint': "/media/cilab/DATA/Hila/Data/Projects/AutoSAM/sam_vit_h.pth",
+        #'sam_checkpoint': "/content/drive/My Drive/sam_vit_h.pth",
+        'sam_checkpoint': "/media/cilab/DATA/Hila/Data/Projects/AutoSAM/sam_vit_h.pth",
         'model_type': "vit_h",
         'generator_args': {
             'points_per_side': 8,

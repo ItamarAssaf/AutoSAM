@@ -7,7 +7,6 @@ from torchvision.models.video import r3d_18  # 3D ResNet
 import time
 from torchvision.models.video import R3D_18_Weights
 
-
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
@@ -65,6 +64,20 @@ class SmallDecoder(nn.Module):
         out = F.tanh(self.final(z))
         return out
 
+
+class MaskRefinement2D(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(MaskRefinement2D, self).__init__()
+        # A simple 2D convolution layer with a sigmoid to smooth and rescale the mask
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        x = self.conv(x)  # Convolution to refine the mask
+        x = self.sigmoid(x)  # Apply sigmoid to output values between [0, 1]
+        return x
+
+
 class SmallDecoder3D(nn.Module):
     def __init__(self, out):
         super(SmallDecoder3D, self).__init__()
@@ -73,22 +86,31 @@ class SmallDecoder3D(nn.Module):
         # x[1] - layer2: 128 channels
         # x[2] - layer3: 256 channels
         # x[3] - layer4: 512 channels
-        
+
         self.up1 = UpBlockSkip3D(512 + 256, 256, func='relu', drop=0)
         self.up2 = UpBlockSkip3D(256 + 128, 128, func='relu', drop=0)
         self.final = CNNBlock3D(128, out, kernel_size=3, drop=0)
+        self.bn = nn.BatchNorm3d(256)  # For your 3D model
+
+        # 🔧 Custom weight initialization
+        self.apply(self.init_weights)
+
+    def init_weights(self, m):
+        if isinstance(m, nn.Conv3d):
+            nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.BatchNorm3d):
+            nn.init.constant_(m.weight, 1)
+            nn.init.constant_(m.bias, 0)
 
     def forward(self, x):
-        # Reverse the order: deepest features first
-        x = x[::-1]  # Now: x[0] = layer4 (512), x[1] = layer3 (256), x[2] = layer2 (128), x[3] = layer1 (64)
-
-        # print(f"x[0] shape: {x[0].shape}, x[1] shape: {x[1].shape}, x[2] shape: {x[2].shape}, x[3] shape: {x[3].shape}")
-        
-        z = self.up1(x[0], x[1])  # 512 + 256 in, output 256
-        z = self.up2(z, x[2])     # 256 + 128 in, output 128
+        x = x[::-1]
+        z = self.up1(x[0], x[1])
+        z = self.up2(z, x[2])
         out = self.final(z)
+        out = self.bn(out)
         return out
-
 
 
 class SparseDecoder(nn.Module):
@@ -106,14 +128,14 @@ class Model(nn.Module):
     def __init__(self, args):
         super(Model, self).__init__()
         nP = int(args['nP']) + 1
-        half = 0.5*nP**2
+        half = 0.5 * nP ** 2
         self.backbone = HarDNet(depth_wise=bool(int(args['depth_wise'])), arch=int(args['order']), args=args)
         d, f = self.backbone.full_features, self.backbone.features
         self.decoder = Decoder(d, out=4)
         for param in self.backbone.parameters():
             param.requires_grad = True
-        x = torch.arange(nP, nP**2, nP).long()
-        y = torch.arange(nP, nP**2, nP).long()
+        x = torch.arange(nP, nP ** 2, nP).long()
+        y = torch.arange(nP, nP ** 2, nP).long()
         grid_x, grid_y = torch.meshgrid(x, y, indexing='ij')
         P = torch.cat((grid_x.unsqueeze(dim=0), grid_y.unsqueeze(dim=0)), dim=0)
         P = P.view(2, -1).permute(1, 0).to(device)
@@ -176,19 +198,21 @@ class ModelEmb3D(nn.Module):
 
         # Freeze backbone
         for param in self.backbone.parameters():
-            param.requires_grad = False  
+            param.requires_grad = True
 
         self.decoder = SmallDecoder3D(out=256)
+        for param in self.decoder.parameters():
+            param.requires_grad = True
 
         if torch.cuda.is_available():
-            self.backbone = self.backbone.half()
-            self.decoder = self.decoder.half()  # Keep decoder in full precision for stability
+            self.backbone = self.backbone #.half()
+            self.decoder = self.decoder# .half()  # Keep decoder in full precision for stability
             self.Idim = int(args['Idim'])
             self.NumSliceDim = int(args['NumSliceDim'])
 
     def forward(self, img):
         if img.device.type == 'cuda':
-            img = img.half()
+            img = img#.half()
 
         if img.shape[2] > 32 or img.shape[3] > 256 or img.shape[4] > 256:
             print(f"⚠ Warning: Very large input detected: {img.shape}. This may be very slow.")
@@ -206,11 +230,17 @@ class ModelEmb3D(nn.Module):
         # FIX: pass correct order of feature maps to decoder
         dense_embeddings = self.decoder(z)
 
+        # assert dense_embeddings.requires_grad, "❌ Decoder output does not require grad!"
+
         dense_embeddings = F.interpolate(
-            dense_embeddings, size=(self.NumSliceDim, self.Idim, self.Idim), mode='trilinear', align_corners=True
+            dense_embeddings, size=(self.NumSliceDim, 64, 64), mode='trilinear', align_corners=True
         )
+        dense_embeddings = F.normalize(dense_embeddings, p=2, dim=1)
 
         return dense_embeddings
+
+
+
 
 
 class ModelSparseEmb(nn.Module):
@@ -332,7 +362,3 @@ if __name__ == "__main__":
     x = torch.randn((4, 256, 64, 64)).to(device)
     z = model(x)
     print(z.shape)
-
-
-
-
