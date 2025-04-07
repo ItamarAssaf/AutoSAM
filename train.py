@@ -727,7 +727,7 @@ def main(args=None, sam_args=None):
     print('Successfully loaded images')
 
     # For debug mode: use only one sample
-    if args.get('debug_mode', False):
+    if args.get('debug_mode', True):
         single_sample = trainset[0]
         trainset = SingleItemDataset(single_sample)
         print("⚠ Debug mode: training with a single sample only.")

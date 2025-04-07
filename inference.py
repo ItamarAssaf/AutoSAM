@@ -1,21 +1,29 @@
 import torch.utils.data
 import torch
 import os
-from models.model_single import ModelEmb
-from dataset.glas import get_glas_dataset
-from dataset.MoNuBrain import get_monu_dataset
-from dataset.polyp import get_polyp_dataset, get_tests_polyp_dataset
-from segment_anything import SamPredictor, sam_model_registry, SamAutomaticMaskGenerator
-from segment_anything.utils.transforms import ResizeLongestSide
 from tqdm import tqdm
 import torch.nn.functional as F
 import numpy as np
 from train import get_input_dict, norm_batch, get_dice_ji
 import cv2
-
+from dataset.tfs import get_lung_transform
+import os
+from torch.utils.data import Dataset, DataLoader
+import nibabel as nib
+import numpy as np
+import matplotlib.pyplot as plt
+import re
+from models.model_single import ModelEmb, ModelEmb3D
+from dataset.glas import get_glas_dataset
+from dataset.MoNuBrain import get_monu_dataset
+from dataset.polyp import get_polyp_dataset, get_tests_polyp_dataset
+from dataset.LungData import get_lung_dataset
+from segment_anything import SamPredictor, sam_model_registry, SamAutomaticMaskGenerator
+from segment_anything.utils.transforms import ResizeLongestSide
+import torch.nn.functional as F
 
 sam_args = {
-    'sam_checkpoint': "cp/sam_vit_h.pth",
+    'sam_checkpoint': "/media/cilab/DATA/Hila/Data/Projects/AutoSAM/sam_vit_h.pth",
     'model_type': "vit_h",
     'generator_args':{
         'points_per_side': 8,
@@ -32,37 +40,124 @@ sam_args = {
 
 
 def inference_ds(ds, model, sam, transform, epoch, args):
+
     pbar = tqdm(ds)
     model.eval()
     iou_list = []
     dice_list = []
     Idim = int(args['Idim'])
-    for ix, (imgs, gts, original_sz, img_sz) in enumerate(pbar):
+    NumSliceDim = int(args['NumSliceDim'])
+    transform_train, transform_test = get_lung_transform(args)
+    count = 0
+
+    for imgs, gts, original_sz, img_sz in pbar:
+        count = count + 1
         orig_imgs = imgs.to(sam.device)
+        if orig_imgs.ndim == 4:
+            orig_imgs = orig_imgs.unsqueeze(0)
+        elif orig_imgs.ndim == 3:
+            orig_imgs = orig_imgs.unsqueeze(0).unsqueeze(0)
         gts = gts.to(sam.device)
-        orig_imgs_small = F.interpolate(orig_imgs, (Idim, Idim), mode='bilinear', align_corners=True)
+
+        orig_imgs_small = F.interpolate(
+            orig_imgs,
+            (Idim, Idim,NumSliceDim),
+            mode='trilinear',
+            align_corners=True
+        )
+
+        orig_imgs_small = orig_imgs_small
+        orig_imgs_small = orig_imgs_small.permute(0, 1, 4, 2, 3)
+        orig_imgs_small = orig_imgs_small *1/3
+        orig_imgs_small = orig_imgs_small.repeat(1, 3, 1, 1, 1)
+
+        gts = gts.permute(0, 3, 1, 2)
+        gts_np = gts.squeeze().detach().cpu().numpy()
+        plt.imshow(gts_np[35,:,:], cmap="gray")
+        plt.show()
+
         dense_embeddings = model(orig_imgs_small)
-        batched_input = get_input_dict(orig_imgs, original_sz, img_sz)
-        masks = norm_batch(sam_call(batched_input, sam, dense_embeddings))
-        input_size = tuple([int(x) for x in img_sz[0].squeeze().tolist()])
-        original_size = tuple([int(x) for x in original_sz[0].squeeze().tolist()])
-        masks = sam.postprocess_masks(masks, input_size=input_size, original_size=original_size)
-        gts = sam.postprocess_masks(gts.unsqueeze(dim=0), input_size=input_size, original_size=original_size)
-        masks = F.interpolate(masks, (Idim, Idim), mode='bilinear', align_corners=True)
-        gts = F.interpolate(gts, (Idim, Idim), mode='nearest')
-        masks[masks > 0.5] = 1
-        masks[masks <= 0.5] = 0
-        dice, ji = get_dice_ji(masks.squeeze().detach().cpu().numpy(),
-                               gts.squeeze().detach().cpu().numpy())
+
+        volume_depth = orig_imgs.shape[-1]
+        if volume_depth < NumSliceDim:
+            print(f"⚠ Volume depth {volume_depth} < NumSliceDim {NumSliceDim}, skipping...")
+            continue
+
+        mask = torch.zeros(NumSliceDim, 256, 256)
+
+        for slice_idx in range(NumSliceDim):
+            current_slice = orig_imgs_small[:, :, slice_idx, :, :].squeeze()
+            current_slice = current_slice.permute(1, 2, 0)
+            current_dense_embeddings = dense_embeddings[:, :, slice_idx, :, :]
+            gts = gts.squeeze()
+            mask_slice = gts[slice_idx, :, :]
+
+            current_slice, mask_slice = transform_test(current_slice.cpu(), mask_slice.cpu())
+            original_sz = current_slice.shape[1:3]
+            current_slice = transform.apply_image_torch(current_slice)
+            current_slice = transform.preprocess(current_slice).cuda()
+            img_sz = current_slice.shape[1:3]
+            img_sz = torch.tensor(img_sz).unsqueeze(0)
+            original_sz = torch.tensor(original_sz).unsqueeze(0)
+
+            batched_input = get_input_dict([current_slice], [original_sz], [img_sz])
+            temp_mask = norm_batch(sam_call(batched_input, sam, current_dense_embeddings).unsqueeze(2))
+
+            input_size = tuple([int(x) for x in img_sz[0].squeeze().tolist()])
+            original_size = tuple([int(x) for x in original_sz[0].squeeze().tolist()])
+            temp_mask = sam.postprocess_masks(temp_mask.squeeze(0), input_size=input_size, original_size=original_size)
+            mask_slice = sam.postprocess_masks(mask_slice.unsqueeze(0).unsqueeze(1), input_size=input_size,
+                                               original_size=original_size)
+            temp_mask = F.interpolate(temp_mask, (Idim, Idim), mode='bilinear', align_corners=True)
+            mask_slice = F.interpolate(mask_slice, (Idim, Idim), mode='nearest')
+
+            temp_mask = temp_mask.squeeze().squeeze()
+            tensor_min, tensor_max = temp_mask.min(), temp_mask.max()
+            mask[slice_idx, :, :] = temp_mask
+            temp_mask_np = temp_mask.detach().cpu().numpy()
+
+        mask = mask.unsqueeze(0).unsqueeze(1).cuda()
+        scans = orig_imgs.squeeze().squeeze()
+        scans = scans.cpu().numpy()
+
+        selected_gts_np = gts.detach().cpu().numpy()
+        mask[mask >= 0.5] = 1
+        mask[mask < 0.5] = 0
+
+        mask_np = mask.squeeze().squeeze().detach().cpu().numpy()
+        fig, axes = plt.subplots(1, 3, figsize=(12, 6))
+        scan = scans[:,:,35]
+        scan = (scan - scan.min()) / (scan.max() - scan.min())
+        axes[0].imshow(scan, cmap="gray")
+        axes[0].set_title(f"Test set scan number {count} - slice 35")
+        axes[0].axis("off")  # Hide axes
+
+
+        axes[1].imshow(selected_gts_np[35, :, :], cmap="gray")
+        axes[1].set_title("Ground Truth mask")
+        axes[1].axis("off")  # Hide axes
+
+        axes[2].imshow(mask_np[35, :, :], cmap="gray")
+        axes[2].set_title("Predicted mask")
+        axes[2].axis("off")  # Hide axes
+        plt.show()
+
+
+        dice, ji = get_dice_ji(
+            mask.squeeze().squeeze().detach().cpu().numpy(),
+            gts.detach().cpu().numpy()
+        )
+
+        print(f"Dice of scan {count} slice 35: {dice}")
+        print(f"IoU of scan {count} slice 35: {ji}")
+
         iou_list.append(ji)
         dice_list.append(dice)
+
         pbar.set_description(
-            '(Inference | {task}) Epoch {epoch} :: Dice {dice:.4f} :: IoU {iou:.4f}'.format(
-                task=args['task'],
-                epoch=epoch,
-                dice=np.mean(dice_list),
-                iou=np.mean(iou_list)))
-    model.train()
+            f'(Inference | {args["task"]}) Epoch {epoch} :: Dice {np.mean(dice_list):.4f} :: IoU {np.mean(iou_list):.4f}'
+        )
+
     return np.mean(iou_list)
 
 
@@ -82,8 +177,9 @@ def sam_call(batched_input, sam, dense_embeddings):
 
 
 def main(args=None):
-    model = ModelEmb(args=args).cuda()
-    model1 = torch.load(args['path_best'])
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = ModelEmb3D(args=args).to(device)
+    model1 = torch.load(args['path_best'], map_location=device, weights_only=False)
     model.load_state_dict(model1.state_dict())
     sam = sam_model_registry[sam_args['model_type']](checkpoint=sam_args['sam_checkpoint'])
     sam.to(device=torch.device('cuda', sam_args['gpu_id']))
@@ -95,6 +191,9 @@ def main(args=None):
         trainset, testset = get_glas_dataset(sam_trans=transform)
     elif args['task'] == 'polyp':
         trainset, testset = get_polyp_dataset(args, sam_trans=transform)
+    elif args['task'] == 'lung':
+        trainset, testset = get_lung_dataset(args, sam_trans=transform)
+
     ds_val = torch.utils.data.DataLoader(testset, batch_size=1, shuffle=False,
                                          num_workers=int(args['nW_eval']), drop_last=False)
     with torch.no_grad():
@@ -110,19 +209,22 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description='Description of your program')
     parser.add_argument('-nW_eval', '--nW_eval', default=0, help='evaluation iteration', required=False)
-    parser.add_argument('-task', '--task', default='monu', help='evaluation iteration', required=False)
+    parser.add_argument('-task', '--task', default='lung', help='evaluation iteration', required=False)
     parser.add_argument('-depth_wise', '--depth_wise', default=False, help='image size', required=False)
     parser.add_argument('-order', '--order', default=85, help='image size', required=False)
-    parser.add_argument('-folder', '--folder', default=34, help='image size', required=False)
-    parser.add_argument('-Idim', '--Idim', default=512, help='image size', required=False)
+    parser.add_argument('-folder', '--folder', default=474, help='image size', required=False)
+    parser.add_argument('-Idim', '--Idim', default=256, help='image size', required=False)
     parser.add_argument('-rotate', '--rotate', default=22, help='image size', required=False)
+    parser.add_argument('-NumSliceDim', '--NumSliceDim', default=64, help='image size', required=False)
     parser.add_argument('-scale1', '--scale1', default=0.75, help='image size', required=False)
     parser.add_argument('-scale2', '--scale2', default=1.25, help='image size', required=False)
     args = vars(parser.parse_args())
-    args['path_best'] = os.path.join('results',
+    base_save_dir = "/media/cilab/DATA/Hila/Data/Projects/AutoSAM/results"
+    results_dir = os.path.join(base_save_dir, f'gpu{args["folder"]}')
+    args['path_best'] = os.path.join(base_save_dir,
                                      'gpu' + str(args['folder']),
                                      'net_best.pth')
-    args['vis_folder'] = os.path.join('results', 'gpu' + str(args['folder']), 'vis')
+    args['vis_folder'] = os.path.join(base_save_dir, 'gpu' + str(args['folder']), 'vis')
     os.makedirs(args['vis_folder'], exist_ok=True)
     main(args=args)
 
