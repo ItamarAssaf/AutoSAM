@@ -85,7 +85,7 @@ def get_monu_transform(args):
     ])
     return transform_train, transform_test
 
-def get_lung_transform(args):
+def get_liver_transform(args):
     Idim = int(args['Idim'])
     transform_train = transforms.Compose([
         #transforms.ToPILImage(),

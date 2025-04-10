@@ -6,7 +6,7 @@ import torch.nn.functional as F
 import numpy as np
 from train import get_input_dict, norm_batch, get_dice_ji
 import cv2
-from dataset.tfs import get_lung_transform
+from dataset.tfs import get_liver_transform
 import os
 from torch.utils.data import Dataset, DataLoader
 import nibabel as nib
@@ -17,7 +17,7 @@ from models.model_single import ModelEmb, ModelEmb3D
 from dataset.glas import get_glas_dataset
 from dataset.MoNuBrain import get_monu_dataset
 from dataset.polyp import get_polyp_dataset, get_tests_polyp_dataset
-from dataset.LungData import get_lung_dataset
+from dataset.LiverData import get_liver_dataset
 from segment_anything import SamPredictor, sam_model_registry, SamAutomaticMaskGenerator
 from segment_anything.utils.transforms import ResizeLongestSide
 import torch.nn.functional as F
@@ -47,7 +47,7 @@ def inference_ds(ds, model, sam, transform, epoch, args):
     dice_list = []
     Idim = int(args['Idim'])
     NumSliceDim = int(args['NumSliceDim'])
-    transform_train, transform_test = get_lung_transform(args)
+    transform_train, transform_test = get_liver_transform(args)
     count = 0
 
     for imgs, gts, original_sz, img_sz in pbar:
@@ -112,9 +112,7 @@ def inference_ds(ds, model, sam, transform, epoch, args):
             mask_slice = F.interpolate(mask_slice, (Idim, Idim), mode='nearest')
 
             temp_mask = temp_mask.squeeze().squeeze()
-            tensor_min, tensor_max = temp_mask.min(), temp_mask.max()
             mask[slice_idx, :, :] = temp_mask
-            temp_mask_np = temp_mask.detach().cpu().numpy()
 
         mask = mask.unsqueeze(0).unsqueeze(1).cuda()
         scans = orig_imgs.squeeze().squeeze()
@@ -191,8 +189,8 @@ def main(args=None):
         trainset, testset = get_glas_dataset(sam_trans=transform)
     elif args['task'] == 'polyp':
         trainset, testset = get_polyp_dataset(args, sam_trans=transform)
-    elif args['task'] == 'lung':
-        trainset, testset = get_lung_dataset(args, sam_trans=transform)
+    elif args['task'] == 'liver':
+        trainset, testset = get_liver_dataset(args, sam_trans=transform)
 
     ds_val = torch.utils.data.DataLoader(testset, batch_size=1, shuffle=False,
                                          num_workers=int(args['nW_eval']), drop_last=False)
@@ -209,7 +207,7 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description='Description of your program')
     parser.add_argument('-nW_eval', '--nW_eval', default=0, help='evaluation iteration', required=False)
-    parser.add_argument('-task', '--task', default='lung', help='evaluation iteration', required=False)
+    parser.add_argument('-task', '--task', default='liver', help='evaluation iteration', required=False)
     parser.add_argument('-depth_wise', '--depth_wise', default=False, help='image size', required=False)
     parser.add_argument('-order', '--order', default=85, help='image size', required=False)
     parser.add_argument('-folder', '--folder', default=474, help='image size', required=False)
