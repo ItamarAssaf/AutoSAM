@@ -45,7 +45,7 @@ from scipy.ndimage import label
 from scipy.ndimage import binary_fill_holes
 
 # Create json file
-main_data = "/media/cilab/DATA/Hila/Data/Projects/AutoSAM/Abdomen"
+main_data = "/media/cilab/DATA/Hila/Data/Projects/AutoSAM/Abdomen_resize"
 Test_data = os.path.join(main_data, "Testing","img")
 Train_data = os.path.join(main_data, "Training","img")
 json_path  = "/media/cilab/DATA/Hila/Data/Projects/AutoSAM/liver_seg_data.json"
@@ -191,7 +191,6 @@ def get_dice_ji(predict, target):
     dice = float(np.nan_to_num(2 * tp / (2 * tp + fp + fn)))
     return dice, ji
 
-
 masks = os.listdir(os.path.join(main_data, "Testing","mask"))
 predicted_masks_files = os.listdir(results_path)
 scans = os.listdir(Test_data)
@@ -200,9 +199,10 @@ for i in range(len(masks)):
     count = count + 1
     mask = nib.load(os.path.join(main_data,"Testing","mask",masks[i]))
     mask = mask.get_fdata()
-    mask = (mask ==6)
+   #mask = (mask ==6)
+    mask[mask >0.5] = 1
+    mask[mask <= 0.5] = 0
     mask = mask.transpose(2, 1, 0)
-
     prediction_mask = nib.load(os.path.join(results_path, predicted_masks_files[i]))
     prediction_mask = prediction_mask.get_fdata()
 
@@ -210,15 +210,15 @@ for i in range(len(masks)):
     scan = scan.get_fdata()
 
     fig, ax = plt.subplots(1, 3, figsize=(12,6))
-    ax[0].imshow(scan[:,:,90], cmap="gray")
+    ax[0].imshow(scan[:,:,40], cmap="gray")
     ax[0].set_title("Scan slice")
     ax[0].axis('off')
 
-    ax[1].imshow(mask[90, :, :], cmap='gray')
+    ax[1].imshow(mask[40, :, :], cmap='gray')
     ax[1].set_title("Ground truth mask")
     ax[1].axis('off')
 
-    ax[2].imshow(prediction_mask[90,:,:],cmap='gray')
+    ax[2].imshow(prediction_mask[40,:,:],cmap='gray')
     ax[2].set_title("Prediction mask")
     ax[2].axis('off')
     plt.tight_layout()
