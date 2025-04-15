@@ -1,24 +1,14 @@
-# AutoSAM
-AutoSAM: Adapting SAM to Medical Images by Overloading the Prompt Encoder
+# AutoSAM 3D medical image segmentation
+Adapting AutoSAM to 3D Medical Images by Overloading the Prompt Encoder
 
 ## Overview
-
-This work improves the Segment Anything Model (SAM) for medical image segmentation by replacing its conditioning mechanism with an image-based encoder. Without further fine-tuning SAM, this modification achieves state-of-the-art results on medical images and video benchmarks. 
-
-## Paper
-
-The paper associated with this repository can be found [here](https://arxiv.org/pdf/2306.06370.pdf).
+This work extend AutoSAM for 3D medical image segmentation (CT scans) by replacing its prompt encoder with a custom encoder tailored for 3D data.
 
 ## Datasets
-
 We used the following datasets in our experiments:
-
-[monu](https://drive.google.com/drive/folders/1bzyHsDWhjhiwzpx_zJ5dpMG3-5F-nhT4?usp=drive_link)
-[glas](https://drive.google.com/drive/folders/1z9xBesNhvuM08yUOpOWcUy7OnBGHenFv?usp=drive_link)
-[polyp](https://drive.google.com/drive/folders/1S11HsauwKO206CPzrGBnTid-nbQMhbZz?usp=drive_link)
+[Abdomen data](https://www.synapse.org/#!Synapse:syn3193805/wiki/217752)
 
 ## SAM checkopints
-
 [sam base](https://drive.google.com/file/d/1ZwKc-7Q8ZaHfbGVKvvkz_LPBemxHyVpf/view?usp=drive_link)
 [sam large](https://drive.google.com/file/d/16AhGjaVXrlheeXte8rvS2g2ZstWye3Xx/view?usp=drive_link)
 [sam huge](https://drive.google.com/file/d/1tFYGukHxUCbCG3wPtuydO-lYakgpSYDd/view?usp=drive_link)
